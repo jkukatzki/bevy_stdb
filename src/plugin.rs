@@ -1,0 +1,170 @@
+//! The main Bevy plugin for SpacetimeDB integration.
+//!
+//! This module provides the builder-style entry point for configuring `bevy_stdb`.
+
+use crate::{
+    channel_bridge::ChannelBridgePlugin,
+    connection::StdbConnectionPlugin,
+    reconnect::{ReconnectPlugin, StdbReconnectOptions},
+    subscription::{StdbSubscriptions, SubscriptionsPlugin},
+    table::TableRegistrar,
+};
+use bevy_app::{App, Plugin};
+use spacetimedb_sdk::{
+    __codegen::{DbConnection, SpacetimeModule},
+    Compression, DbContext, SubscriptionHandle,
+};
+use std::{hash::Hash, sync::Arc, thread::JoinHandle};
+
+/// Builder-style plugin for configuring the Bevy-SpacetimeDB integration.
+pub struct StdbPlugin<
+    C: DbConnection<Module = M> + DbContext + Send + Sync,
+    M: SpacetimeModule<DbConnection = C>,
+> {
+    module_name: Option<String>,
+    uri: Option<String>,
+    token: Option<String>,
+    run_fn: Option<fn(&C) -> JoinHandle<()>>,
+    compression: Option<Compression>,
+    reconnect_options: Option<StdbReconnectOptions>,
+    subscriptions_initializer: Option<Arc<dyn Fn(&mut App) + Send + Sync>>,
+    table_registrars: Vec<
+        Arc<
+            dyn for<'a, 'db> Fn(&mut TableRegistrar<'a, 'db, <C as DbContext>::DbView>)
+                + Send
+                + Sync,
+        >,
+    >,
+}
+
+impl<C: DbConnection<Module = M> + DbContext + Send + Sync, M: SpacetimeModule<DbConnection = C>>
+    Default for StdbPlugin<C, M>
+{
+    fn default() -> Self {
+        Self {
+            module_name: None,
+            uri: None,
+            token: None,
+            run_fn: None,
+            compression: Some(Compression::default()),
+            reconnect_options: None,
+            subscriptions_initializer: None,
+            table_registrars: Vec::new(),
+        }
+    }
+}
+
+impl<C: DbConnection<Module = M> + DbContext + Send + Sync, M: SpacetimeModule<DbConnection = C>>
+    StdbPlugin<C, M>
+{
+    /// Sets the function used to drive the connection.
+    pub fn with_run_fn(mut self, run_fn: fn(&C) -> JoinHandle<()>) -> Self {
+        self.run_fn = Some(run_fn);
+        self
+    }
+
+    /// Sets the remote module name.
+    pub fn with_module_name(mut self, name: impl Into<String>) -> Self {
+        self.module_name = Some(name.into());
+        self
+    }
+
+    /// Sets the SpacetimeDB host URI.
+    pub fn with_uri(mut self, uri: impl Into<String>) -> Self {
+        self.uri = Some(uri.into());
+        self
+    }
+
+    /// Sets the authentication token.
+    pub fn with_token(mut self, token: impl Into<String>) -> Self {
+        self.token = Some(token.into());
+        self
+    }
+
+    /// Sets the connection compression mode.
+    pub fn with_compression(mut self, compression: Compression) -> Self {
+        self.compression = Some(compression);
+        self
+    }
+
+    /// Registers table callbacks through a [`TableRegistrar`].
+    ///
+    /// Typical usage:
+    ///
+    /// ```ignore
+    /// .with_table(|reg| reg.add_table(&reg.db().player_info()))
+    /// .with_table(|reg| reg.add_table_without_pk(&reg.db().nearby_monsters()))
+    /// .with_table(|reg| reg.add_event_table(&reg.db().log_events()))
+    /// ```
+    pub fn with_table(
+        mut self,
+        register: impl for<'a, 'db> Fn(&mut TableRegistrar<'a, 'db, <C as DbContext>::DbView>)
+        + Send
+        + Sync
+        + 'static,
+    ) -> Self {
+        self.table_registrars.push(Arc::new(register));
+        self
+    }
+
+    /// Enables subscriptions and initializes the stored subscription state.
+    pub fn with_subscriptions<K>(
+        mut self,
+        init: impl Fn(&mut StdbSubscriptions<K, M>) + Send + Sync + 'static,
+    ) -> Self
+    where
+        K: Eq + Hash + Clone + Send + Sync + 'static,
+        M::SubscriptionHandle: SubscriptionHandle + Send + Sync + 'static,
+        C: DbConnection<Module = M>
+            + DbContext<SubscriptionBuilder = spacetimedb_sdk::__codegen::SubscriptionBuilder<M>>
+            + Send
+            + Sync
+            + 'static,
+    {
+        let init = Arc::new(init);
+        self.subscriptions_initializer = Some(Arc::new(move |app: &mut App| {
+            let init = init.clone();
+            app.add_plugins(SubscriptionsPlugin::<K, C, M>::new(move |subs| {
+                init(subs);
+            }));
+        }));
+        self
+    }
+
+    /// Enables automatic reconnects with the given options.
+    pub fn with_reconnect(mut self, reconnect_config: StdbReconnectOptions) -> Self {
+        self.reconnect_options = Some(reconnect_config);
+        self
+    }
+}
+
+impl<
+    C: DbConnection<Module = M> + DbContext + Send + Sync + 'static,
+    M: SpacetimeModule<DbConnection = C> + 'static,
+> Plugin for StdbPlugin<C, M>
+{
+    /// Installs the configured `bevy_stdb` plugins and resources.
+    fn build(&self, app: &mut App) {
+        app.add_plugins(ChannelBridgePlugin);
+
+        if let Some(reconnect_options) = self.reconnect_options.clone() {
+            app.add_plugins(ReconnectPlugin::<C, M>::new(reconnect_options));
+        }
+
+        if let Some(init) = self.subscriptions_initializer.clone() {
+            init(app);
+        }
+
+        app.add_plugins(StdbConnectionPlugin::<C, M> {
+            module_name: self
+                .module_name
+                .clone()
+                .expect("No module name set. Use with_module_name()"),
+            uri: self.uri.clone().expect("No uri set. Use with_uri()"),
+            token: self.token.clone(),
+            run_fn: self.run_fn.expect("No run function set. Use with_run_fn()"),
+            compression: self.compression.unwrap_or_default(),
+            table_registrars: self.table_registrars.clone(),
+        });
+    }
+}
