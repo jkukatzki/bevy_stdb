@@ -1,15 +1,17 @@
 # bevy_stdb
 
 A [Bevy](https://bevy.org/) integration for [SpacetimeDB](https://spacetimedb.com).
-
 [![crates.io](https://img.shields.io/crates/v/bevy_stdb)](https://crates.io/crates/bevy_stdb)
 [![docs.rs](https://docs.rs/bevy_stdb/badge.svg)](https://docs.rs/bevy_stdb)
 
-`bevy_stdb` adapts SpacetimeDB's connection and callback model into Bevy-style resources, systems, plugins, and messages.
+![Useless AI generated image that kind of looks cool](https://github.com/user-attachments/assets/b6cf0408-0c0d-4997-bf9c-e2e0989ab5f3)
+_Please enjoy this useless AI generated image based on the README contents of this repo._
+
+
 
 ## Overview
 
-`bevy_stdb` is built around a few core ideas:
+`bevy_stdb` adapts SpacetimeDB's connection and callback model into Bevy-style resources, systems, plugins, and messages. Its built around a few core ideas:
 
 - Configure everything through `StdbPlugin`
 - Expose the active live connection as a Bevy resource via `StdbConnection`
