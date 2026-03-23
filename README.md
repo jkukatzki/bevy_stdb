@@ -131,7 +131,7 @@ Use `StdbPlugin::with_reconnect` with `StdbReconnectOptions` to enable retry beh
 
 | bevy_stdb | bevy   | spacetimedb_sdk |
 | --------- | ------ | --------------- |
-| 0.1.0     | 0.18.x | 2.0.x           |
+| 0.1 - 0.2 | 0.18   | 2.0             |
 
 ## Notes
 
