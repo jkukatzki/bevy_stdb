@@ -127,6 +127,31 @@ Use `StdbPlugin::with_reconnect` with `StdbReconnectOptions` to enable retry beh
 - table callbacks are re-bound
 - queued subscriptions are re-applied
 
+## Type Aliases
+
+It is useful to define some type aliases of your own. I suggest doing something like this:
+
+```rust
+#[derive(Clone, Eq, Hash, PartialEq, Debug)]
+pub enum SubKeys {
+    PlayerInfo,
+    TimeOfDay,
+}
+
+pub type StdbConn = StdbConnection<DbConnection>;
+pub type StdbSubs = StdbSubscriptions<SubKeys, RemoteModule>;
+
+// Or a more constrained version for typical use cases:
+// pub type StdbConn<'w> = Res<'w, StdbConnection<DbConnection>>;
+// pub type StdbSubs<'w> = ResMut<'w, StdbSubscriptions<SubKeys, RemoteModule>>;
+
+// Usage example
+fn example_system(conn: Res<StdbConn>, mut subs: ResMut<StdbSubs>) {
+    let my_table = conn.db().player_info().id().find(&1);
+    subs.subscribe_query(SubKeys::TimeOfDay, |q| q.from.world_clock());
+}
+```
+
 ## Compatibility
 
 | bevy_stdb | bevy   | spacetimedb_sdk |
