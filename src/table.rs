@@ -51,7 +51,7 @@ impl<'a, 'db, DbView> TableRegistrar<'a, 'db, DbView> {
     ///
     /// Forwards table changes as:
     /// - [`InsertMessage`], [`DeleteMessage`], [`UpdateMessage`], and [`InsertUpdateMessage`]
-    pub fn add_table<TRow, TTable>(&mut self, table: &TTable)
+    pub fn table<TRow, TTable>(&mut self, table: &TTable)
     where
         TRow: Send + Sync + Clone + 'static,
         TTable: Table<Row = TRow> + TableWithPrimaryKey<Row = TRow>,
@@ -75,7 +75,7 @@ impl<'a, 'db, DbView> TableRegistrar<'a, 'db, DbView> {
     /// Registers a table without a primary key.
     ///
     /// Forwards inserts and deletes as [`InsertMessage`] and [`DeleteMessage`].
-    pub fn add_table_without_pk<TRow, TTable>(&mut self, table: &TTable)
+    pub fn table_without_pk<TRow, TTable>(&mut self, table: &TTable)
     where
         TRow: Send + Sync + Clone + 'static,
         TTable: Table<Row = TRow>,
@@ -94,19 +94,19 @@ impl<'a, 'db, DbView> TableRegistrar<'a, 'db, DbView> {
 
     /// Registers a view.
     ///
-    /// This is equivalent to [`TableRegistrar::add_table_without_pk`].
-    pub fn add_view<TRow, TTable>(&mut self, table: &TTable)
+    /// This is equivalent to [`TableRegistrar::table_without_pk`].
+    pub fn view<TRow, TTable>(&mut self, table: &TTable)
     where
         TRow: Send + Sync + Clone + 'static,
         TTable: Table<Row = TRow>,
     {
-        self.add_table_without_pk(table);
+        self.table_without_pk(table);
     }
 
     /// Registers an event table.
     ///
     /// Forwards inserts as [`InsertMessage`].
-    pub fn add_event_table<TRow, TTable>(&mut self, table: &TTable)
+    pub fn event_table<TRow, TTable>(&mut self, table: &TTable)
     where
         TRow: Send + Sync + Clone + 'static,
         TTable: Table<Row = TRow> + EventTable,

@@ -92,9 +92,9 @@ impl<C: DbConnection<Module = M> + DbContext + Send + Sync, M: SpacetimeModule<D
     /// Typical usage:
     ///
     /// ```ignore
-    /// .with_table(|reg| reg.add_table(&reg.db().player_info()))
-    /// .with_table(|reg| reg.add_table_without_pk(&reg.db().nearby_monsters()))
-    /// .with_table(|reg| reg.add_event_table(&reg.db().log_events()))
+    /// .with_table(|reg| reg.table(&reg.db().player_info()))
+    /// .with_table(|reg| reg.table_without_pk(&reg.db().nearby_monsters()))
+    /// .with_table(|reg| reg.event_table(&reg.db().log_events()))
     /// ```
     pub fn with_table(
         mut self,

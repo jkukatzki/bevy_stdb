@@ -56,10 +56,11 @@ fn main() {
             StdbPlugin::<DbConnection, RemoteModule>::default()
                 .with_module_name("my_module")
                 .with_uri("http://localhost:3000")
-                .with_table(|reg| reg.add_table(&reg.db().player_info()))
-                .with_table(|reg| reg.add_table_without_pk(&reg.db().nearby_monsters()))
+                .with_table(|reg| reg.table(&reg.db().player_info()))
+                .with_table(|reg| reg.table_without_pk(&reg.db().nearby_monsters()))
                 .with_subscriptions::<MySubKey>(|subs| {
-                    // This is a great place to add "global" subscriptions, but you can subscribe from any system too.
+                    // This is a great place to add "global" subscriptions,
+                    // but you can subscribe from any system too.
                     subs.subscribe_query(MySubKey::PlayerInfo, |q| q.from.player_info());
                 })
                 .with_reconnect(StdbReconnectOptions::default())
@@ -85,10 +86,10 @@ The closure receives a `TableRegistrar` that already carries the current databas
 Typical forms are:
 
 ```rust
-.with_table(|reg| reg.add_table(&reg.db().player_info()))
-.with_table(|reg| reg.add_table_without_pk(&reg.db().nearby_monsters()))
-.with_table(|reg| reg.add_event_table(&reg.db().some_event_stream()))
-.with_table(|reg| reg.add_view(&reg.db().some_view()))
+.with_table(|reg| reg.table(&reg.db().player_info()))
+.with_table(|reg| reg.table_without_pk(&reg.db().nearby_monsters()))
+.with_table(|reg| reg.event_table(&reg.db().some_event_stream()))
+.with_table(|reg| reg.view(&reg.db().some_view()))
 ```
 
 These registrations are replayed during initialization to install the required Bevy message channels and again whenever the connection enters the connected state to bind callbacks for the current live database view.
