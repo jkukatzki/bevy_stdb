@@ -42,11 +42,6 @@ impl<'a, 'db, DbView> TableRegistrar<'a, 'db, DbView> {
         }
     }
 
-    /// Returns the database view for this registrar.
-    pub fn db(&self) -> &'db DbView {
-        self.db
-    }
-
     /// Registers a table with a primary key.
     ///
     /// Forwards table changes as:
