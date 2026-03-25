@@ -1,6 +1,15 @@
 //! Reconnect policy and runtime state for SpacetimeDB connections.
 //!
 //! This module manages reconnect timing and backoff through Bevy systems.
+//!
+//! `Connected` and `Disconnected` are treated as SDK-driven states and should
+//! only be entered in response to the connection callbacks forwarded through
+//! `StdbConnectedMessage`, `StdbDisconnectedMessage`, and
+//! `StdbConnectionErrorMessage`.
+//!
+//! The reconnect plugin owns the policy-oriented states instead:
+//! - `Reconnecting` while retry attempts are pending
+//! - `Exhausted` when retry attempts have been exhausted
 
 use crate::connection::{StdbConnection, StdbConnectionConfig, StdbConnectionState};
 use bevy_app::{App, Plugin, PreUpdate};
@@ -209,11 +218,6 @@ fn on_reconnect_success<C>(
         reconnect.current_delay = Duration::ZERO;
         reconnect.timer = None;
     }
-
-    world
-        .get_resource_mut::<NextState<StdbConnectionState>>()
-        .expect("NextState<StdbConnectionState> should exist during reconnect success")
-        .set(StdbConnectionState::Connected);
 }
 
 fn on_reconnect_failure(world: &mut World) {

@@ -56,8 +56,10 @@ fn main() {
             StdbPlugin::<DbConnection, RemoteModule>::default()
                 .with_module_name("my_module")
                 .with_uri("http://localhost:3000")
-                .with_table(|reg| reg.table(&reg.db().player_info()))
-                .with_table(|reg| reg.table_without_pk(&reg.db().nearby_monsters()))
+                .with_tables(|reg, db| {
+                    reg.table(&db.player_info());
+                    reg.table_without_pk(&db.nearby_monsters());
+                })
                 .with_subscriptions::<MySubKey>(|subs| {
                     // This is a great place to add "global" subscriptions,
                     // but you can subscribe from any system too.
@@ -79,20 +81,22 @@ fn on_player_info_insert(mut msgs: ReadInsertMessage<PlayerInfo>) {
 
 ## Table registration
 
-Use `StdbPlugin::with_table` to register one table per call.
+Use `StdbPlugin::with_tables` to register all table callbacks in one place.
 
-The closure receives a `TableRegistrar` that already carries the current database view. Use `reg.db()` to access that view and then register exactly one table.
+The closure receives both a `TableRegistrar` and the current database view. Use the `db` argument to select tables, views, and event streams, then register them through `reg`.
 
 Typical forms are:
 
 ```rust
-.with_table(|reg| reg.table(&reg.db().player_info()))
-.with_table(|reg| reg.table_without_pk(&reg.db().nearby_monsters()))
-.with_table(|reg| reg.event_table(&reg.db().some_event_stream()))
-.with_table(|reg| reg.view(&reg.db().some_view()))
+.with_tables(|reg, db| {
+    reg.table(&db.player_info());
+    reg.table_without_pk(&db.nearby_monsters());
+    reg.event_table(&db.some_event_stream());
+    reg.view(&db.some_view());
+})
 ```
 
-These registrations are replayed during initialization to install the required Bevy message channels and again whenever the connection enters the connected state to bind callbacks for the current live database view.
+`with_tables` is intended to be called once during plugin setup. These registrations are replayed during initialization to install the required Bevy message channels and again whenever the connection enters the connected state to bind callbacks for the current live database view.
 
 ## Messages
 
@@ -115,13 +119,15 @@ That means you can:
 - queue additional subscriptions later from normal Bevy systems
 - automatically re-apply queued subscription intent after reconnect
 
+Like the other `StdbPlugin` configuration methods, `with_subscriptions` is intended to be configured once during plugin setup.
+
 Subscriptions are keyed, so the application can refer to them using its own domain-specific identifiers, allowing you to also unsubscribe as needed later.
 
 ## Reconnects
 
 Reconnect behavior is opt-in.
 
-Use `StdbPlugin::with_reconnect` with `StdbReconnectOptions` to enable retry behavior after disconnects. When reconnect succeeds:
+Use `StdbPlugin::with_reconnect` with `StdbReconnectOptions` to enable retry behavior after disconnects. Like the other `StdbPlugin` configuration methods, it is intended to be configured once during plugin setup. When reconnect succeeds:
 
 - the live `StdbConnection` resource is replaced
 - table callbacks are re-bound
@@ -157,6 +163,7 @@ fn example_system(conn: Res<StdbConn>, mut subs: ResMut<StdbSubs>) {
 | bevy_stdb | bevy   | spacetimedb_sdk |
 | --------- | ------ | --------------- |
 | 0.1 - 0.2 | 0.18   | 2.0             |
+| 0.3       | 0.18   | 2.1             |
 
 ## Notes
 

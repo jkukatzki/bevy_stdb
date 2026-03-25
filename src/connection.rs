@@ -12,6 +12,7 @@ use crate::{
 };
 use bevy_app::{App, Plugin, PreUpdate};
 use bevy_ecs::{resource::Resource, system::ResMut};
+
 use bevy_state::{
     app::{AppExtStates, StatesPlugin},
     state::{NextState, OnEnter, States},
@@ -61,10 +62,10 @@ pub(crate) struct StdbConnectionConfig<
     pub run_fn: fn(&C) -> JoinHandle<()>,
     /// Compression configuration for the connection.
     pub compression: Compression,
-    /// Stored table registration closures for init and bind.
-    pub table_registrars: Vec<
+    /// Stored table registration closure for init and bind.
+    pub table_registrar: Option<
         Arc<
-            dyn for<'a, 'db> Fn(&mut TableRegistrar<'a, 'db, <C as DbContext>::DbView>)
+            dyn for<'a, 'db> Fn(&mut TableRegistrar<'a>, &'db <C as DbContext>::DbView)
                 + Send
                 + Sync,
         >,
@@ -193,10 +194,10 @@ pub(crate) struct StdbConnectionPlugin<
     pub run_fn: fn(&C) -> JoinHandle<()>,
     /// Compression configuration for the connection.
     pub compression: Compression,
-    /// Stored table registration closures for init and bind.
-    pub table_registrars: Vec<
+    /// Stored table registration closure for init and bind.
+    pub table_registrar: Option<
         Arc<
-            dyn for<'a, 'db> Fn(&mut TableRegistrar<'a, 'db, <C as DbContext>::DbView>)
+            dyn for<'a, 'db> Fn(&mut TableRegistrar<'a>, &'db <C as DbContext>::DbView)
                 + Send
                 + Sync,
         >,
@@ -219,7 +220,7 @@ impl<C: DbConnection<Module = M> + DbContext + Send + Sync, M: SpacetimeModule<D
             token: self.token.clone(),
             run_fn: self.run_fn,
             compression: self.compression,
-            table_registrars: self.table_registrars.clone(),
+            table_registrar: self.table_registrar.clone(),
             connected_tx: register_channel::<StdbConnectedMessage>(app),
             disconnected_tx: register_channel::<StdbDisconnectedMessage>(app),
             error_tx: register_channel::<StdbConnectionErrorMessage>(app),
@@ -238,7 +239,7 @@ impl<C: DbConnection<Module = M> + DbContext + Send + Sync, M: SpacetimeModule<D
 
     /// Establishes the initial connection and registers table handlers.
     fn finish(&self, app: &mut App) {
-        let (conn, table_registrars, run_fn) = {
+        let (conn, table_registrar, run_fn) = {
             let config = app
                 .world()
                 .get_resource::<StdbConnectionConfig<C, M>>()
@@ -248,12 +249,12 @@ impl<C: DbConnection<Module = M> + DbContext + Send + Sync, M: SpacetimeModule<D
                 .build_connection()
                 .expect("Failed to establish initial connection");
 
-            (conn, config.table_registrars.clone(), config.run_fn)
+            (conn, config.table_registrar.clone(), config.run_fn)
         };
 
-        for register in &table_registrars {
+        if let Some(register) = &table_registrar {
             let db = conn.db();
-            register(&mut TableRegistrar::new_init(app, db));
+            register(&mut TableRegistrar::new_init(app), db);
         }
 
         run_fn(conn.as_ref());
@@ -302,7 +303,7 @@ fn on_connected_bind<
         .expect("StdbConnection should exist before Connected bind phase");
 
     let db = conn.db();
-    for register in &config.table_registrars {
-        register(&mut TableRegistrar::new_bind(&*world, db));
+    if let Some(register) = &config.table_registrar {
+        register(&mut TableRegistrar::new_bind(&*world), db);
     }
 }
