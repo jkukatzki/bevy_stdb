@@ -20,6 +20,8 @@ use std::{
     marker::PhantomData,
 };
 
+type SubscriptionInitializer<K, M> = dyn Fn(&mut StdbSubscriptions<K, M>) + Send + Sync;
+
 /// A [`Resource`] that stores SpacetimeDB subscriptions in Bevy.
 ///
 /// Subscription intent is kept separately from active handles so it can be
@@ -91,10 +93,12 @@ where
         let mut first_err = None;
 
         for (_, handle) in self.handles.drain() {
-            if let Err(err) = handle.unsubscribe() {
-                if first_err.is_none() {
-                    first_err = Some(err);
-                }
+            let Err(err) = handle.unsubscribe() else {
+                continue;
+            };
+
+            if first_err.is_none() {
+                first_err = Some(err);
             }
         }
 
@@ -176,7 +180,7 @@ where
     M: SpacetimeModule<DbConnection = C>,
     M::SubscriptionHandle: StdbSubscriptionHandle + Send + Sync + 'static,
 {
-    initializer: Box<dyn Fn(&mut StdbSubscriptions<K, M>) + Send + Sync>,
+    initializer: Box<SubscriptionInitializer<K, M>>,
     _marker: PhantomData<(C, M)>,
 }
 
