@@ -30,10 +30,8 @@ pub struct StdbPlugin<
     subscriptions_initializer: Option<Arc<dyn Fn(&mut App) + Send + Sync>>,
     table_registrar: Option<
         Arc<
-            dyn for<'a, 'db> Fn(
-                    &mut TableRegistrar<'a, 'db, <C as DbContext>::DbView>,
-                    &'db <C as DbContext>::DbView,
-                ) + Send
+            dyn for<'a, 'db> Fn(&mut TableRegistrar<'a>, &'db <C as DbContext>::DbView)
+                + Send
                 + Sync,
         >,
     >,
@@ -119,10 +117,8 @@ impl<C: DbConnection<Module = M> + DbContext + Send + Sync, M: SpacetimeModule<D
     /// ```
     pub fn with_tables(
         mut self,
-        register: impl for<'a, 'db> Fn(
-            &mut TableRegistrar<'a, 'db, <C as DbContext>::DbView>,
-            &'db <C as DbContext>::DbView,
-        ) + Send
+        register: impl for<'a, 'db> Fn(&mut TableRegistrar<'a>, &'db <C as DbContext>::DbView)
+        + Send
         + Sync
         + 'static,
     ) -> Self {

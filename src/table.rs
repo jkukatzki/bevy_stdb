@@ -15,9 +15,8 @@ use std::sync::mpsc::Sender;
 ///
 /// Registration runs once to initialize channels and again to bind callbacks
 /// for the active connection.
-pub struct TableRegistrar<'a, 'db, DbView> {
+pub struct TableRegistrar<'a> {
     mode: TableRegistrarMode<'a>,
-    _db: &'db DbView,
 }
 
 enum TableRegistrarMode<'a> {
@@ -25,20 +24,18 @@ enum TableRegistrarMode<'a> {
     Bind(&'a World),
 }
 
-impl<'a, 'db, DbView> TableRegistrar<'a, 'db, DbView> {
+impl<'a> TableRegistrar<'a> {
     /// Creates a registrar that initializes message channels.
-    pub fn new_init(app: &'a mut App, db: &'db DbView) -> Self {
+    pub fn new_init(app: &'a mut App) -> Self {
         Self {
             mode: TableRegistrarMode::Init(app),
-            _db: db,
         }
     }
 
     /// Creates a registrar that binds callbacks for the active connection.
-    pub fn new_bind(world: &'a World, db: &'db DbView) -> Self {
+    pub fn new_bind(world: &'a World) -> Self {
         Self {
             mode: TableRegistrarMode::Bind(world),
-            _db: db,
         }
     }
 

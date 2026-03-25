@@ -65,10 +65,8 @@ pub(crate) struct StdbConnectionConfig<
     /// Stored table registration closure for init and bind.
     pub table_registrar: Option<
         Arc<
-            dyn for<'a, 'db> Fn(
-                    &mut TableRegistrar<'a, 'db, <C as DbContext>::DbView>,
-                    &'db <C as DbContext>::DbView,
-                ) + Send
+            dyn for<'a, 'db> Fn(&mut TableRegistrar<'a>, &'db <C as DbContext>::DbView)
+                + Send
                 + Sync,
         >,
     >,
@@ -199,10 +197,8 @@ pub(crate) struct StdbConnectionPlugin<
     /// Stored table registration closure for init and bind.
     pub table_registrar: Option<
         Arc<
-            dyn for<'a, 'db> Fn(
-                    &mut TableRegistrar<'a, 'db, <C as DbContext>::DbView>,
-                    &'db <C as DbContext>::DbView,
-                ) + Send
+            dyn for<'a, 'db> Fn(&mut TableRegistrar<'a>, &'db <C as DbContext>::DbView)
+                + Send
                 + Sync,
         >,
     >,
@@ -258,7 +254,7 @@ impl<C: DbConnection<Module = M> + DbContext + Send + Sync, M: SpacetimeModule<D
 
         if let Some(register) = &table_registrar {
             let db = conn.db();
-            register(&mut TableRegistrar::new_init(app, db), db);
+            register(&mut TableRegistrar::new_init(app), db);
         }
 
         run_fn(conn.as_ref());
@@ -308,6 +304,6 @@ fn on_connected_bind<
 
     let db = conn.db();
     if let Some(register) = &config.table_registrar {
-        register(&mut TableRegistrar::new_bind(&*world, db), db);
+        register(&mut TableRegistrar::new_bind(&*world), db);
     }
 }
