@@ -12,6 +12,7 @@ use crate::{
 };
 use bevy_app::{App, Plugin, PreUpdate};
 use bevy_ecs::{resource::Resource, system::ResMut};
+
 use bevy_state::{
     app::{AppExtStates, StatesPlugin},
     state::{NextState, OnEnter, States},

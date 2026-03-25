@@ -209,11 +209,6 @@ fn on_reconnect_success<C>(
         reconnect.current_delay = Duration::ZERO;
         reconnect.timer = None;
     }
-
-    world
-        .get_resource_mut::<NextState<StdbConnectionState>>()
-        .expect("NextState<StdbConnectionState> should exist during reconnect success")
-        .set(StdbConnectionState::Connected);
 }
 
 fn on_reconnect_failure(world: &mut World) {

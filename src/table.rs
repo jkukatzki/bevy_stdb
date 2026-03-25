@@ -17,7 +17,7 @@ use std::sync::mpsc::Sender;
 /// for the active connection.
 pub struct TableRegistrar<'a, 'db, DbView> {
     mode: TableRegistrarMode<'a>,
-    db: &'db DbView,
+    _db: &'db DbView,
 }
 
 enum TableRegistrarMode<'a> {
@@ -30,7 +30,7 @@ impl<'a, 'db, DbView> TableRegistrar<'a, 'db, DbView> {
     pub fn new_init(app: &'a mut App, db: &'db DbView) -> Self {
         Self {
             mode: TableRegistrarMode::Init(app),
-            db,
+            _db: db,
         }
     }
 
@@ -38,7 +38,7 @@ impl<'a, 'db, DbView> TableRegistrar<'a, 'db, DbView> {
     pub fn new_bind(world: &'a World, db: &'db DbView) -> Self {
         Self {
             mode: TableRegistrarMode::Bind(world),
-            db,
+            _db: db,
         }
     }
 
