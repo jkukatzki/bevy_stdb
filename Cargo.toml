@@ -1,6 +1,6 @@
 [package]
 name = "bevy_stdb"
-version = "0.3.1"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.93"
 description = "A Bevy-native integration for SpacetimeDB with table messages, subscriptions, and reconnect support."
@@ -19,9 +19,13 @@ bevy_ecs = "0.18"
 bevy_state = "0.18"
 bevy_time = "0.18"
 spacetimedb-sdk = "2.1"
+wasm-bindgen-futures = { version = "0.4", optional = true }
+
 
 [features]
 default = []
+browser = ["spacetimedb-sdk/browser", "wasm-bindgen-futures"]
+
 
 [package.metadata.docs.rs]
 all-features = true

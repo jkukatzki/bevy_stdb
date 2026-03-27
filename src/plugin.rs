@@ -4,17 +4,18 @@
 
 use crate::{
     channel_bridge::ChannelBridgePlugin,
-    connection::StdbConnectionPlugin,
+    connection::{ConnectionDriver, StdbConnectionPlugin},
     reconnect::{ReconnectPlugin, StdbReconnectOptions},
     subscription::{StdbSubscriptions, SubscriptionsPlugin},
     table::{TableRegistrar, TableRegistrarCallback},
 };
 use bevy_app::{App, Plugin};
+use bevy_state::app::StatesPlugin;
 use spacetimedb_sdk::{
     __codegen::{DbConnection, SpacetimeModule},
     Compression, DbContext, SubscriptionHandle,
 };
-use std::{hash::Hash, sync::Arc, thread::JoinHandle};
+use std::{hash::Hash, sync::Arc};
 
 type SubscriptionsInitializer = dyn Fn(&mut App) + Send + Sync;
 
@@ -23,11 +24,16 @@ pub struct StdbPlugin<
     C: DbConnection<Module = M> + DbContext + Send + Sync,
     M: SpacetimeModule<DbConnection = C>,
 > {
+    // Built-in SpacetimeDB fields
     module_name: Option<String>,
     uri: Option<String>,
     token: Option<String>,
-    run_fn: Option<fn(&C) -> JoinHandle<()>>,
     compression: Option<Compression>,
+
+    // Option for how to process events from the websocket
+    driver: Option<ConnectionDriver<C>>,
+
+    // Custom options for reconnect and safely storing sub/table information
     reconnect_options: Option<StdbReconnectOptions>,
     subscriptions_initializer: Option<Arc<SubscriptionsInitializer>>,
     table_registrar: Option<Arc<TableRegistrarCallback<C>>>,
@@ -41,8 +47,8 @@ impl<C: DbConnection<Module = M> + DbContext + Send + Sync, M: SpacetimeModule<D
             module_name: None,
             uri: None,
             token: None,
-            run_fn: None,
-            compression: Some(Compression::default()),
+            driver: None,
+            compression: None,
             reconnect_options: None,
             subscriptions_initializer: None,
             table_registrar: None,
@@ -53,13 +59,33 @@ impl<C: DbConnection<Module = M> + DbContext + Send + Sync, M: SpacetimeModule<D
 impl<C: DbConnection<Module = M> + DbContext + Send + Sync, M: SpacetimeModule<DbConnection = C>>
     StdbPlugin<C, M>
 {
-    /// Sets the function used to drive the connection.
-    pub fn with_run_fn(mut self, run_fn: fn(&C) -> JoinHandle<()>) -> Self {
+    /// Sets the function used to drive the connection from the Bevy schedule.
+    ///
+    /// Exactly one connection driver must be configured for the plugin.
+    pub fn with_frame_driver(mut self, frame_tick: fn(&C) -> spacetimedb_sdk::Result<()>) -> Self {
         assert!(
-            self.run_fn.is_none(),
-            "`with_run_fn()` may only be called once"
+            self.driver.is_none(),
+            "`with_frame_driver()` may only be called once"
         );
-        self.run_fn = Some(run_fn);
+        self.driver = Some(ConnectionDriver::FrameTick(frame_tick));
+        self
+    }
+
+    /// Sets the function used to drive the connection in the background.
+    ///
+    /// Exactly one connection driver must be configured for the plugin.
+    pub fn with_background_driver<R>(mut self, background_driver: fn(&C) -> R) -> Self
+    where
+        R: 'static,
+    {
+        assert!(
+            self.driver.is_none(),
+            "`with_background_driver()` may only be called once"
+        );
+        self.driver = Some(ConnectionDriver::Background(Arc::new(move |conn: &C| {
+            let _ = background_driver(conn);
+        })));
+
         self
     }
 
@@ -70,6 +96,7 @@ impl<C: DbConnection<Module = M> + DbContext + Send + Sync, M: SpacetimeModule<D
             "`with_module_name()` may only be called once"
         );
         self.module_name = Some(name.into());
+
         self
     }
 
@@ -77,6 +104,7 @@ impl<C: DbConnection<Module = M> + DbContext + Send + Sync, M: SpacetimeModule<D
     pub fn with_uri(mut self, uri: impl Into<String>) -> Self {
         assert!(self.uri.is_none(), "`with_uri()` may only be called once");
         self.uri = Some(uri.into());
+
         self
     }
 
@@ -87,6 +115,7 @@ impl<C: DbConnection<Module = M> + DbContext + Send + Sync, M: SpacetimeModule<D
             "`with_token()` may only be called once"
         );
         self.token = Some(token.into());
+
         self
     }
 
@@ -97,6 +126,7 @@ impl<C: DbConnection<Module = M> + DbContext + Send + Sync, M: SpacetimeModule<D
             "`with_compression()` may only be called once"
         );
         self.compression = Some(compression);
+
         self
     }
 
@@ -123,6 +153,7 @@ impl<C: DbConnection<Module = M> + DbContext + Send + Sync, M: SpacetimeModule<D
             "`with_tables()` may only be called once"
         );
         self.table_registrar = Some(Arc::new(register));
+
         self
     }
 
@@ -144,6 +175,8 @@ impl<C: DbConnection<Module = M> + DbContext + Send + Sync, M: SpacetimeModule<D
             self.subscriptions_initializer.is_none(),
             "`with_subscriptions()` may only be called once"
         );
+
+        // Store a type-erased initializer here so StdbPlugin itself does not need to be generic over K.
         let init = Arc::new(init);
         self.subscriptions_initializer = Some(Arc::new(move |app: &mut App| {
             let init = init.clone();
@@ -151,6 +184,7 @@ impl<C: DbConnection<Module = M> + DbContext + Send + Sync, M: SpacetimeModule<D
                 init(subs);
             }));
         }));
+
         self
     }
 
@@ -161,6 +195,7 @@ impl<C: DbConnection<Module = M> + DbContext + Send + Sync, M: SpacetimeModule<D
             "`with_reconnect()` may only be called once"
         );
         self.reconnect_options = Some(reconnect_config);
+
         self
     }
 }
@@ -171,7 +206,17 @@ impl<
 > Plugin for StdbPlugin<C, M>
 {
     /// Installs the configured `bevy_stdb` plugins and resources.
+    ///
+    /// A connection driver must be configured with exactly one of:
+    /// - `with_background_driver()`
+    /// - `with_frame_driver()`
+    ///
+    /// The configured driver determines how the active connection is progressed
+    /// after creation.
     fn build(&self, app: &mut App) {
+        if !app.is_plugin_added::<StatesPlugin>() {
+            app.add_plugins(StatesPlugin);
+        }
         app.add_plugins(ChannelBridgePlugin);
 
         if let Some(reconnect_options) = self.reconnect_options.clone() {
@@ -189,7 +234,11 @@ impl<
                 .expect("No module name set. Use with_module_name()"),
             uri: self.uri.clone().expect("No uri set. Use with_uri()"),
             token: self.token.clone(),
-            run_fn: self.run_fn.expect("No run function set. Use with_run_fn()"),
+            driver: self.driver.clone().or_else(|| {
+                panic!(
+                    "No connection driver set. Use with_background_driver() or with_frame_driver()"
+                )
+            }),
             compression: self.compression.unwrap_or_default(),
             table_registrar: self.table_registrar.clone(),
         });

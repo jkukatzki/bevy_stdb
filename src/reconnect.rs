@@ -11,7 +11,9 @@
 //! - `Reconnecting` while retry attempts are pending
 //! - `Exhausted` when retry attempts have been exhausted
 
-use crate::connection::{StdbConnection, StdbConnectionConfig, StdbConnectionState};
+use crate::connection::{
+    ConnectionDriver, StdbConnection, StdbConnectionConfig, StdbConnectionState,
+};
 use bevy_app::{App, Plugin, PreUpdate};
 use bevy_ecs::prelude::{IntoScheduleConfigs, Res, ResMut, Resource, World};
 use bevy_state::prelude::{NextState, OnEnter, in_state};
@@ -20,9 +22,26 @@ use spacetimedb_sdk::{
     __codegen::{DbConnection, SpacetimeModule},
     DbContext,
 };
-use std::{sync::Arc, thread::JoinHandle, time::Duration};
+#[cfg(feature = "browser")]
+use std::sync::{
+    Mutex,
+    mpsc::{Receiver, TryRecvError, channel},
+};
+use std::{sync::Arc, time::Duration};
 
-type ReconnectAttempt<C> = Result<(Arc<C>, fn(&C) -> JoinHandle<()>), ()>;
+/// Browser-only reconnect result type.
+type ReconnectResult<C> = Result<(Arc<C>, Option<ConnectionDriver<C>>), ()>;
+
+/// Browser-only receiver for an in-flight reconnect attempt.
+///
+/// The browser reconnect path builds the replacement connection asynchronously
+/// and sends the result back through this resource so runtime systems can
+/// finalize success or failure on the Bevy world thread.
+#[cfg(feature = "browser")]
+#[derive(Resource)]
+pub(crate) struct PendingReconnectReceiver<C: DbContext + Send + Sync + 'static> {
+    pub rx: Mutex<Receiver<ReconnectResult<C>>>,
+}
 
 /// Reconnect options for a SpacetimeDB connection.
 #[derive(Clone, Debug)]
@@ -100,7 +119,7 @@ where
     C: DbConnection<Module = M> + DbContext + Send + Sync,
     M: SpacetimeModule<DbConnection = C>,
 {
-    config: ReconnectConfig,
+    reconnect_options: StdbReconnectOptions,
     _marker: std::marker::PhantomData<(C, M)>,
 }
 
@@ -110,9 +129,9 @@ where
     M: SpacetimeModule<DbConnection = C>,
 {
     /// Creates a reconnect plugin from the given options.
-    pub fn new(options: StdbReconnectOptions) -> Self {
+    pub fn new(reconnect_options: StdbReconnectOptions) -> Self {
         Self {
-            config: options.into(),
+            reconnect_options,
             _marker: std::marker::PhantomData,
         }
     }
@@ -124,7 +143,7 @@ impl<
 > Plugin for ReconnectPlugin<C, M>
 {
     fn build(&self, app: &mut App) {
-        app.insert_resource(self.config.clone());
+        app.insert_resource(ReconnectConfig::from(self.reconnect_options.clone()));
         app.init_resource::<ReconnectState>();
 
         app.add_systems(
@@ -134,7 +153,11 @@ impl<
 
         app.add_systems(
             PreUpdate,
-            tick_reconnect_timer::<C, M>.run_if(in_state(StdbConnectionState::Reconnecting)),
+            (
+                tick_reconnect_timer::<C, M>.run_if(in_state(StdbConnectionState::Reconnecting)),
+                #[cfg(feature = "browser")]
+                finalize_pending_reconnect::<C>.run_if(in_state(StdbConnectionState::Reconnecting)),
+            ),
         );
     }
 }
@@ -151,6 +174,7 @@ fn begin_reconnect_on_disconnect(
     next_state.set(StdbConnectionState::Reconnecting);
 }
 
+#[cfg(not(feature = "browser"))]
 fn tick_reconnect_timer<C, M>(world: &mut World)
 where
     C: DbConnection<Module = M> + DbContext + Send + Sync + 'static,
@@ -161,8 +185,57 @@ where
     }
 
     match try_reconnect::<C, M>(world) {
-        Ok((conn, run_fn)) => on_reconnect_success(world, conn, run_fn),
+        Ok((conn, driver)) => on_reconnect_success(world, conn, driver),
         Err(_) => on_reconnect_failure(world),
+    }
+}
+
+#[cfg(feature = "browser")]
+fn tick_reconnect_timer<C, M>(world: &mut World)
+where
+    C: DbConnection<Module = M> + DbContext + Send + Sync + 'static,
+    M: SpacetimeModule<DbConnection = C> + 'static,
+{
+    if !ready_to_retry(world) {
+        return;
+    }
+
+    if world.contains_resource::<PendingReconnectReceiver<C>>() {
+        return;
+    }
+
+    let config = world
+        .get_resource::<StdbConnectionConfig<C, M>>()
+        .expect("StdbConnectionConfig should exist during reconnect")
+        .clone();
+
+    let (tx, rx) = channel();
+
+    wasm_bindgen_futures::spawn_local(async move {
+        let result = match config.build_connection().await {
+            Ok(conn) => Ok((conn, config.driver.clone())),
+            Err(_) => Err(()),
+        };
+        let _ = tx.send(result);
+    });
+
+    world.insert_resource(PendingReconnectReceiver::<C> { rx: Mutex::new(rx) });
+}
+
+#[cfg(not(feature = "browser"))]
+fn try_reconnect<C, M>(world: &mut World) -> ReconnectResult<C>
+where
+    C: DbConnection<Module = M> + DbContext + Send + Sync + 'static,
+    M: SpacetimeModule<DbConnection = C> + 'static,
+{
+    let config = world
+        .get_resource::<StdbConnectionConfig<C, M>>()
+        .expect("StdbConnectionConfig should exist during reconnect");
+
+    let driver = config.driver.clone();
+    match config.build_connection() {
+        Ok(conn) => Ok((conn, driver)),
+        Err(_) => Err(()),
     }
 }
 
@@ -184,27 +257,13 @@ fn ready_to_retry(world: &mut World) -> bool {
     timer.is_finished()
 }
 
-fn try_reconnect<C, M>(world: &mut World) -> ReconnectAttempt<C>
-where
-    C: DbConnection<Module = M> + DbContext + Send + Sync + 'static,
-    M: SpacetimeModule<DbConnection = C> + 'static,
-{
-    let config = world
-        .get_resource::<StdbConnectionConfig<C, M>>()
-        .expect("StdbConnectionConfig should exist during reconnect");
-
-    let run_fn = config.run_fn;
-    match config.build_connection() {
-        Ok(conn) => Ok((conn, run_fn)),
-        Err(_) => Err(()),
-    }
-}
-
-fn on_reconnect_success<C>(world: &mut World, conn: Arc<C>, run_fn: fn(&C) -> JoinHandle<()>)
+fn on_reconnect_success<C>(world: &mut World, conn: Arc<C>, driver: Option<ConnectionDriver<C>>)
 where
     C: DbContext + Send + Sync + 'static,
 {
-    run_fn(conn.as_ref());
+    if let Some(ConnectionDriver::Background(background_driver)) = driver {
+        background_driver(conn.as_ref());
+    }
     world.insert_resource(StdbConnection::new(conn));
 
     {
@@ -214,6 +273,38 @@ where
         reconnect.attempts = 0;
         reconnect.current_delay = Duration::ZERO;
         reconnect.timer = None;
+    }
+}
+
+#[cfg(feature = "browser")]
+fn finalize_pending_reconnect<C>(world: &mut World)
+where
+    C: DbContext + Send + Sync + 'static,
+{
+    let result = {
+        let Some(receiver) = world.get_resource::<PendingReconnectReceiver<C>>() else {
+            return;
+        };
+
+        let rx = receiver.rx.lock().unwrap_or_else(|e| e.into_inner());
+
+        match rx.try_recv() {
+            Ok(result) => Some(result),
+            Err(TryRecvError::Empty) => None,
+            // The receiver is per reconnect attempt.
+            // If its sender drops before sending a result, treat that attempt as a normal reconnect failure.
+            Err(TryRecvError::Disconnected) => Some(Err(())),
+        }
+    };
+
+    let Some(result) = result else {
+        return;
+    };
+
+    world.remove_resource::<PendingReconnectReceiver<C>>();
+    match result {
+        Ok((conn, driver)) => on_reconnect_success(world, conn, driver),
+        Err(_) => on_reconnect_failure(world),
     }
 }
 
