@@ -33,7 +33,7 @@ impl Plugin for ChannelBridgePlugin {
     }
 }
 
-// Drain all registered channels once per frame.
+/// Drain all registered channels once per frame.
 fn drain_channels(world: &mut World) {
     world.resource_scope(|world, registry: Mut<ChannelRegistry>| {
         for entry in &registry.channels {
@@ -44,14 +44,21 @@ fn drain_channels(world: &mut World) {
 
 /// Registers a channel for message type `T`.
 ///
-/// Returns an existing sender if the channel has already been registered.
-///
 /// # Panics
-///
-/// Panics if [`ChannelRegistry`] has not been initialized.
-pub(crate) fn register_channel<T: Message>(app: &mut App) -> Sender<T> {
-    let (tx, rx) = unbounded::<T>();
+/// Panics if [`ChannelRegistry`] has not been initialized or if the
+/// channel for `T` has already been registered.
+pub(crate) fn register_channel<T: Message>(app: &mut App) {
+    assert!(
+        !app.world()
+            .resource::<ChannelRegistry>()
+            .channels
+            .iter()
+            .any(|entry| entry.type_id == TypeId::of::<T>()),
+        "attempted to register channel for message type `{}` more than once",
+        std::any::type_name::<T>(),
+    );
 
+    let (tx, rx) = unbounded::<T>();
     app.add_message::<T>();
 
     app.world_mut()
@@ -66,8 +73,6 @@ pub(crate) fn register_channel<T: Message>(app: &mut App) -> Sender<T> {
             }),
             sender: Arc::new(tx.clone()),
         });
-
-    tx
 }
 
 /// Returns the registered `Sender<T>`.

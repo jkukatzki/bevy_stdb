@@ -5,9 +5,9 @@ use crate::{
     alias::{
         ReadStdbConnectedMessage, ReadStdbConnectionErrorMessage, ReadStdbDisconnectedMessage,
     },
-    channel_bridge::register_channel,
+    channel_bridge::{channel_sender, register_channel},
     message::{StdbConnectedMessage, StdbConnectionErrorMessage, StdbDisconnectedMessage},
-    table::{TableRegistrar, TableRegistrarCallback},
+    table::{RegistrarMode, TableRegistrar, TableRegistrarCallback},
 };
 use bevy_app::{App, Plugin, PreUpdate};
 use bevy_ecs::{
@@ -273,6 +273,11 @@ impl<
     fn build(&self, app: &mut App) {
         app.init_state::<StdbConnectionState>();
 
+        register_channel::<StdbConnectedMessage>(app);
+        register_channel::<StdbDisconnectedMessage>(app);
+        register_channel::<StdbConnectionErrorMessage>(app);
+
+        let world = app.world();
         let config = StdbConnectionConfig::<C, M> {
             module_name: self.module_name.clone(),
             uri: self.uri.clone(),
@@ -280,9 +285,9 @@ impl<
             driver: self.driver.clone(),
             compression: self.compression,
             table_registrar: self.table_registrar.clone(),
-            connected_tx: register_channel::<StdbConnectedMessage>(app),
-            disconnected_tx: register_channel::<StdbDisconnectedMessage>(app),
-            error_tx: register_channel::<StdbConnectionErrorMessage>(app),
+            connected_tx: channel_sender::<StdbConnectedMessage>(world),
+            disconnected_tx: channel_sender::<StdbDisconnectedMessage>(world),
+            error_tx: channel_sender::<StdbConnectionErrorMessage>(world),
         };
 
         let initial_connection_state = {
@@ -387,7 +392,7 @@ impl<
 
         if let Some(register) = table_registrar {
             let db = conn.db();
-            register(&mut TableRegistrar::new_init(app), db);
+            register(&mut TableRegistrar::new(RegistrarMode::Init(app)), db);
         }
 
         if let Some(ConnectionDriver::Background(background_driver)) = driver {
@@ -433,7 +438,7 @@ fn on_connected_bind<
 
     let db = conn.db();
     if let Some(register) = &config.table_registrar {
-        register(&mut TableRegistrar::new_bind(&*world), db);
+        register(&mut TableRegistrar::new(RegistrarMode::Bind(&*world)), db);
     }
 }
 
