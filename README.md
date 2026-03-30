@@ -58,7 +58,6 @@ fn main() {
                 .with_uri("http://localhost:3000")
                 .with_tables(|reg, db| {
                     reg.table(&db.player_info());
-                    reg.table_without_pk(&db.nearby_monsters());
                 })
                 .with_subscriptions::<MySubKey>(|subs| {
                     // This is a great place to add "global" subscriptions,
@@ -183,20 +182,18 @@ fn main() {
 
 Use `StdbPlugin::with_tables` to register all table callbacks in one place.
 
-The closure receives both a `TableRegistrar` and the current database view. Use the `db` argument to select tables, views, and event streams, then register them through `reg`.
-
-Typical forms are:
+The closure receives both a `TableRegistrar` and the current database view. Use the `db` argument to access your tables for registration.
 
 ```rust
 .with_tables(|reg, db| {
     reg.table(&db.player_info());
-    reg.table_without_pk(&db.nearby_monsters());
-    reg.event_table(&db.some_event_stream());
-    reg.view(&db.some_view());
+    reg.table_without_pk(&db.world_clock());
+    reg.event_table(&db.damage_events());
+    reg.view(&db.nearby_monsters());
 })
 ```
 
-`with_tables` is intended to be called once during plugin setup. These registrations are replayed during initialization to install the required Bevy message channels and again whenever the connection enters the connected state to bind callbacks for the current live database view.
+These registrations are replayed during initialization to install the required Bevy message channels and again whenever the connection enters the connected state to bind callbacks for the current live database view.
 
 ## Messages
 
@@ -211,27 +208,23 @@ This lets normal Bevy systems react to database changes using message readers.
 
 ## Subscriptions
 
-`StdbSubscriptions` stores desired subscription intent separately from the live connection.
+`StdbSubscriptions` stores desired subscription intent separately from the live connection and serves as a lightweight wrapper to manage them.
 
 That means you can:
 
-- declare global (or any other) subscriptions during plugin setup with `with_subscriptions`
+- declare global _(or any other)_ subscriptions during plugin setup using `with_subscriptions`
 - queue additional subscriptions later from normal Bevy systems
 - automatically re-apply queued subscription intent after reconnect
 
-Like the other `StdbPlugin` configuration methods, `with_subscriptions` is intended to be configured once during plugin setup.
-
-Subscriptions are keyed, so the application can refer to them using its own domain-specific identifiers, allowing you to also unsubscribe as needed later.
+Subscriptions are keyed, so you can refer to them using domain-specific identifiers to do things like resubscribe dynamically or unsubscribe.
 
 ## Reconnects
 
-Reconnect behavior is opt-in.
+Reconnect behavior is opt-in. Use `StdbPlugin::with_reconnect` with `StdbReconnectOptions` to enable retry behavior after disconnects. When a reconnect succeeds:
 
-Use `StdbPlugin::with_reconnect` with `StdbReconnectOptions` to enable retry behavior after disconnects. Like the other `StdbPlugin` configuration methods, it is intended to be configured once during plugin setup. When reconnect succeeds:
-
-- the live `StdbConnection` resource is replaced
-- table callbacks are re-bound
-- queued subscriptions are re-applied
+- the `StdbConnection` resource is replaced
+- table messages are re-bound
+- subscriptions are re-applied
 
 ## Type Aliases
 
@@ -269,4 +262,4 @@ fn example_system(conn: Res<StdbConn>, mut subs: ResMut<StdbSubs>) {
 
 This crate focuses on table-driven client workflows. Reducer and procedure access still exist through the active `StdbConnection`, but the primary Bevy-facing event flow is table/message based.
 
-The project was heavily inspired by [`bevy_spacetimedb`](https://docs.rs/bevy_spacetimedb/), but takes a different approach to plugin structure, connection lifecycle handling, reconnect behavior, and subscription restoration.
+Special thanks to [`bevy_spacetimedb`](https://docs.rs/bevy_spacetimedb/) for the inspiration!
