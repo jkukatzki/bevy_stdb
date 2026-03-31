@@ -151,12 +151,12 @@ where
     }
 
     /// Returns `true` if any subscription has queued work.
-    pub(crate) fn has_queued(&self) -> bool {
+    fn has_queued(&self) -> bool {
         self.entries.values().any(|entry| entry.queued)
     }
 
     /// Applies queued subscriptions to the active connection.
-    pub(crate) fn apply_queued<C>(&mut self, conn: &StdbConnection<C>)
+    fn apply_queued<C>(&mut self, conn: &StdbConnection<C>)
     where
         C: DbConnection<Module = M>
             + DbContext<SubscriptionBuilder = SubscriptionBuilder<M>>
