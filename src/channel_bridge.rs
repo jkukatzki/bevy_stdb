@@ -5,7 +5,7 @@
 use bevy_app::{App, Plugin, PreUpdate};
 use bevy_ecs::prelude::{Message, Messages, Mut, Resource, World};
 use crossbeam_channel::{Sender, unbounded};
-use std::any::{Any, TypeId};
+use std::any::{Any, TypeId, type_name};
 
 /// Stores the registered message channels.
 struct ChannelEntry {
@@ -85,12 +85,12 @@ pub(crate) fn channel_sender<T: Message>(world: &World) -> Sender<T> {
         .channels
         .iter()
         .find(|entry| entry.type_id == TypeId::of::<T>())
-        .unwrap_or_else(|| panic!("unregistered channel for `{}`", std::any::type_name::<T>()));
+        .unwrap_or_else(|| panic!("unregistered channel for `{}`", type_name::<T>()));
 
     entry
         .sender
         .as_ref()
         .downcast_ref::<Sender<T>>()
-        .unwrap_or_else(|| panic!("unexpected type for sender`{}`", std::any::type_name::<T>(),))
+        .unwrap_or_else(|| panic!("unexpected type for sender`{}`", type_name::<T>(),))
         .clone()
 }
