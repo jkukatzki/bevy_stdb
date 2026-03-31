@@ -1,6 +1,9 @@
 //! Table registration for SpacetimeDB message forwarding.
 //!
-//! This module binds table callbacks and forwards table changes into Bevy messages.
+//! This module provides helpers for:
+//! - registering Bevy messages for a table row type during app setup
+//! - binding SpacetimeDB table callbacks later when a connection is active
+//! - exposing small per-kind binder helpers so plugin APIs can use `reg.bind(...)`
 
 use crate::{
     channel_bridge::{channel_sender, register_channel},
@@ -8,171 +11,205 @@ use crate::{
 };
 use bevy_app::App;
 use bevy_ecs::world::World;
-use spacetimedb_sdk::__codegen::DbContext;
 use spacetimedb_sdk::{EventTable, Table, TableWithPrimaryKey};
 use std::marker::PhantomData;
 
-pub(crate) type TableRegistrarCallback<C> =
-    dyn for<'a, 'db> Fn(&mut TableRegistrar<'a>, &'db <C as DbContext>::DbView) + Send + Sync;
+/// Stored callback that performs one-time Bevy app registration for a table/view.
+pub(crate) type TableRegistrationCallback = dyn Fn(&mut App) + Send + Sync;
 
-pub(crate) enum RegistrarMode<'a> {
-    Init(&'a mut App),
-    Bind(&'a World),
-}
+/// Stored callback that binds SpacetimeDB table listeners for a concrete database view.
+pub(crate) type TableBindCallback<C> = dyn for<'db> Fn(&World, &'db <C as spacetimedb_sdk::__codegen::DbContext>::DbView)
+    + Send
+    + Sync;
 
-/// Registers SpacetimeDB table callbacks as Bevy messages.
+/// Binds callbacks for a table with a primary key.
 ///
-/// Registration runs once to initialize channels and again to bind callbacks
-/// for the active connection.
-pub struct TableRegistrar<'a> {
-    mode: RegistrarMode<'a>,
+/// Calling [`Self::bind`] attaches SpacetimeDB table callbacks and forwards
+/// them as Bevy messages for insert, delete, update, and insert-or-update
+/// changes.
+pub struct TableBinder<'w, TRow> {
+    world: &'w World,
+    _marker: PhantomData<fn() -> TRow>,
 }
 
-impl<'a> TableRegistrar<'a> {
-    /// Creates a new [`TableRegistrar`] with the given mode.
-    pub(crate) fn new(mode: RegistrarMode<'a>) -> Self {
-        Self { mode }
+impl<'w, TRow> TableBinder<'w, TRow> {
+    pub(crate) fn new(world: &'w World) -> Self {
+        Self {
+            world,
+            _marker: PhantomData,
+        }
     }
 
-    /// Registers a table with a primary key.
-    ///
-    /// Forwards table changes as:
-    /// - [`InsertMessage`], [`DeleteMessage`], [`UpdateMessage`], and [`InsertUpdateMessage`]
-    pub fn table<TRow, TTable>(&mut self, table: &TTable)
+    /// Binds the default SpacetimeDB callbacks for `table` and forwards them as
+    /// Bevy messages.
+    pub fn bind<TTable>(self, table: TTable)
     where
         TRow: Send + Sync + Clone + 'static,
         TTable: Table<Row = TRow> + TableWithPrimaryKey<Row = TRow>,
     {
-        self.build(table, |table| {
-            table.insert();
-            table.delete();
-            table.update();
-            table.insert_update();
-        });
+        bind_table::<TRow, TTable>(self.world, &table);
+    }
+}
+
+/// Binds callbacks for a table without a primary key.
+///
+/// Calling [`Self::bind`] attaches SpacetimeDB table callbacks and forwards
+/// insert and delete changes as Bevy messages.
+pub struct TableWithoutPkBinder<'w, TRow> {
+    world: &'w World,
+    _marker: PhantomData<fn() -> TRow>,
+}
+
+impl<'w, TRow> TableWithoutPkBinder<'w, TRow> {
+    pub(crate) fn new(world: &'w World) -> Self {
+        Self {
+            world,
+            _marker: PhantomData,
+        }
     }
 
-    /// Registers a table without a primary key.
-    ///
-    /// Forwards inserts and deletes as [`InsertMessage`] and [`DeleteMessage`].
-    pub fn table_without_pk<TRow, TTable>(&mut self, table: &TTable)
+    /// Binds the default SpacetimeDB callbacks for `table` and forwards them as
+    /// Bevy messages.
+    pub fn bind<TTable>(self, table: TTable)
     where
         TRow: Send + Sync + Clone + 'static,
         TTable: Table<Row = TRow>,
     {
-        self.build(table, |table| {
-            table.insert();
-            table.delete();
-        });
+        bind_table_without_pk::<TRow, TTable>(self.world, &table);
+    }
+}
+
+/// Binds callbacks for a view.
+///
+/// Calling [`Self::bind`] attaches SpacetimeDB table callbacks and forwards
+/// insert and delete changes as Bevy messages.
+pub struct ViewBinder<'w, TRow> {
+    world: &'w World,
+    _marker: PhantomData<fn() -> TRow>,
+}
+
+impl<'w, TRow> ViewBinder<'w, TRow> {
+    pub(crate) fn new(world: &'w World) -> Self {
+        Self {
+            world,
+            _marker: PhantomData,
+        }
     }
 
-    /// Registers a view.
-    ///
-    /// This is equivalent to [`TableRegistrar::table_without_pk`].
-    pub fn view<TRow, TTable>(&mut self, table: &TTable)
+    /// Binds the default SpacetimeDB callbacks for `table` and forwards them as
+    /// Bevy messages.
+    pub fn bind<TTable>(self, table: TTable)
     where
         TRow: Send + Sync + Clone + 'static,
         TTable: Table<Row = TRow>,
     {
-        self.table_without_pk(table);
+        bind_view::<TRow, TTable>(self.world, &table);
+    }
+}
+
+/// Binds callbacks for an event table.
+///
+/// Calling [`Self::bind`] attaches SpacetimeDB table callbacks and forwards
+/// insert changes as Bevy messages.
+pub struct EventTableBinder<'w, TRow> {
+    world: &'w World,
+    _marker: PhantomData<fn() -> TRow>,
+}
+
+impl<'w, TRow> EventTableBinder<'w, TRow> {
+    pub(crate) fn new(world: &'w World) -> Self {
+        Self {
+            world,
+            _marker: PhantomData,
+        }
     }
 
-    /// Registers an event table.
-    ///
-    /// Forwards inserts as [`InsertMessage`].
-    pub fn event_table<TRow, TTable>(&mut self, table: &TTable)
+    pub fn bind<TTable>(self, table: TTable)
     where
         TRow: Send + Sync + Clone + 'static,
         TTable: Table<Row = TRow> + EventTable,
     {
-        self.build(table, |table| {
-            table.insert();
-        });
-    }
-
-    /// Use [`TableBindingBuilder`] to select which messages to forward.
-    pub fn build<TRow, TTable>(
-        &mut self,
-        table: &TTable,
-        build: impl for<'r> FnOnce(&mut TableBindingBuilder<'r, 'a, TRow, TTable>),
-    ) where
-        TRow: Send + Sync + Clone + 'static,
-        TTable: Table<Row = TRow>,
-    {
-        build(&mut TableBindingBuilder {
-            registrar: self,
-            table,
-            _row: PhantomData,
-        });
+        bind_event_table::<TRow, TTable>(self.world, &table);
     }
 }
 
-/// Builder for configuring which table events should be forwarded.
-pub struct TableBindingBuilder<'r, 't, TRow, TTable>
+/// Registers the Bevy messages for a table with a primary key.
+pub(crate) fn register_table<TRow>(app: &mut App)
+where
+    TRow: Send + Sync + Clone + 'static,
+{
+    register_channel::<InsertMessage<TRow>>(app);
+    register_channel::<DeleteMessage<TRow>>(app);
+    register_channel::<UpdateMessage<TRow>>(app);
+    register_channel::<InsertUpdateMessage<TRow>>(app);
+}
+
+/// Registers the Bevy messages for a table without a primary key.
+pub(crate) fn register_table_without_pk<TRow>(app: &mut App)
+where
+    TRow: Send + Sync + Clone + 'static,
+{
+    register_channel::<InsertMessage<TRow>>(app);
+    register_channel::<DeleteMessage<TRow>>(app);
+}
+
+/// Registers the Bevy messages for a view.
+pub(crate) fn register_view<TRow>(app: &mut App)
+where
+    TRow: Send + Sync + Clone + 'static,
+{
+    register_table_without_pk::<TRow>(app);
+}
+
+/// Registers the Bevy messages for an event table.
+pub(crate) fn register_event_table<TRow>(app: &mut App)
+where
+    TRow: Send + Sync + Clone + 'static,
+{
+    register_channel::<InsertMessage<TRow>>(app);
+}
+
+/// Binds all callbacks for a table with a primary key.
+pub(crate) fn bind_table<TRow, TTable>(world: &World, table: &TTable)
+where
+    TRow: Send + Sync + Clone + 'static,
+    TTable: Table<Row = TRow> + TableWithPrimaryKey<Row = TRow>,
+{
+    bind_insert::<TRow, TTable>(world, table);
+    bind_delete::<TRow, TTable>(world, table);
+    bind_update::<TRow, TTable>(world, table);
+    bind_insert_update::<TRow, TTable>(world, table);
+}
+
+/// Binds insert and delete callbacks for a table without a primary key.
+pub(crate) fn bind_table_without_pk<TRow, TTable>(world: &World, table: &TTable)
 where
     TRow: Send + Sync + Clone + 'static,
     TTable: Table<Row = TRow>,
 {
-    registrar: &'r mut TableRegistrar<'t>,
-    table: &'r TTable,
-    _row: PhantomData<TRow>,
+    bind_insert::<TRow, TTable>(world, table);
+    bind_delete::<TRow, TTable>(world, table);
 }
 
-impl<'r, 't, TRow, TTable> TableBindingBuilder<'r, 't, TRow, TTable>
+/// Binds insert and delete callbacks for a view.
+pub(crate) fn bind_view<TRow, TTable>(world: &World, table: &TTable)
 where
     TRow: Send + Sync + Clone + 'static,
     TTable: Table<Row = TRow>,
 {
-    /// Forwards inserts as [`InsertMessage`].
-    pub fn insert(&mut self) -> &mut Self {
-        match &mut self.registrar.mode {
-            RegistrarMode::Init(app) => register_channel::<InsertMessage<TRow>>(app),
-            RegistrarMode::Bind(world) => bind_insert::<TRow, TTable>(world, self.table),
-        }
-        self
-    }
+    bind_table_without_pk::<TRow, TTable>(world, table);
 }
 
-impl<'r, 't, TRow, TTable> TableBindingBuilder<'r, 't, TRow, TTable>
+/// Binds insert callbacks for an event table.
+pub(crate) fn bind_event_table<TRow, TTable>(world: &World, table: &TTable)
 where
     TRow: Send + Sync + Clone + 'static,
-    TTable: Table<Row = TRow>,
-    TTable: TableWithPrimaryKey<Row = TRow>,
+    TTable: Table<Row = TRow> + EventTable,
 {
-    /// Forwards updates as [`UpdateMessage`].
-    pub fn update(&mut self) -> &mut Self {
-        match &mut self.registrar.mode {
-            RegistrarMode::Init(app) => register_channel::<UpdateMessage<TRow>>(app),
-            RegistrarMode::Bind(world) => bind_update::<TRow, TTable>(world, self.table),
-        }
-        self
-    }
-
-    /// Forwards inserts and updates as [`InsertUpdateMessage`].
-    pub fn insert_update(&mut self) -> &mut Self {
-        match &mut self.registrar.mode {
-            RegistrarMode::Init(app) => register_channel::<InsertUpdateMessage<TRow>>(app),
-            RegistrarMode::Bind(world) => bind_insert_update::<TRow, TTable>(world, self.table),
-        }
-        self
-    }
+    bind_insert::<TRow, TTable>(world, table);
 }
 
-impl<'r, 't, TRow, TTable> TableBindingBuilder<'r, 't, TRow, TTable>
-where
-    TRow: Send + Sync + Clone + 'static,
-    TTable: Table<Row = TRow>,
-{
-    /// Forwards deletes as [`DeleteMessage`].
-    pub fn delete(&mut self) -> &mut Self {
-        match &mut self.registrar.mode {
-            RegistrarMode::Init(app) => register_channel::<DeleteMessage<TRow>>(app),
-            RegistrarMode::Bind(world) => bind_delete::<TRow, TTable>(world, self.table),
-        }
-        self
-    }
-}
-
-fn bind_insert<TRow, TTable>(world: &World, table: &TTable)
+pub(crate) fn bind_insert<TRow, TTable>(world: &World, table: &TTable)
 where
     TRow: Send + Sync + Clone + 'static,
     TTable: Table<Row = TRow>,
@@ -183,7 +220,7 @@ where
     });
 }
 
-fn bind_delete<TRow, TTable>(world: &World, table: &TTable)
+pub(crate) fn bind_delete<TRow, TTable>(world: &World, table: &TTable)
 where
     TRow: Send + Sync + Clone + 'static,
     TTable: Table<Row = TRow>,
@@ -194,7 +231,7 @@ where
     });
 }
 
-fn bind_update<TRow, TTable>(world: &World, table: &TTable)
+pub(crate) fn bind_update<TRow, TTable>(world: &World, table: &TTable)
 where
     TRow: Send + Sync + Clone + 'static,
     TTable: Table<Row = TRow> + TableWithPrimaryKey<Row = TRow>,
@@ -208,7 +245,7 @@ where
     });
 }
 
-fn bind_insert_update<TRow, TTable>(world: &World, table: &TTable)
+pub(crate) fn bind_insert_update<TRow, TTable>(world: &World, table: &TTable)
 where
     TRow: Send + Sync + Clone + 'static,
     TTable: Table<Row = TRow> + TableWithPrimaryKey<Row = TRow>,
