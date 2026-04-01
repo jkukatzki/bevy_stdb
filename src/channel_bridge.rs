@@ -1,7 +1,8 @@
 //! Channel-backed message delivery for Bevy.
 //!
-//! This module registers per-type channels and forwards queued values into `Messages<T>`.
-
+//! Registers per-type channels and forwards messages from those
+//! channels into Bevy `Messages<T>`, such as SpacetimeDB table events
+//! or connection lifecycle messages.
 use bevy_app::{App, Plugin, PreUpdate};
 use bevy_ecs::prelude::{Message, Messages, Mut, Resource, World};
 use crossbeam_channel::{Sender, unbounded};
@@ -18,7 +19,7 @@ struct ChannelEntry {
 }
 
 #[derive(Resource, Default)]
-pub(crate) struct ChannelRegistry {
+struct ChannelRegistry {
     channels: Vec<ChannelEntry>,
 }
 
@@ -30,7 +31,7 @@ impl Plugin for ChannelBridgePlugin {
     }
 }
 
-/// Drain all registered channels once per frame.
+/// Drains all registered channels once per frame.
 fn drain_channels(world: &mut World) {
     world.resource_scope(|world, registry: Mut<ChannelRegistry>| {
         for entry in &registry.channels {
@@ -52,7 +53,7 @@ pub(crate) fn register_channel<T: Message>(app: &mut App) {
             .iter()
             .any(|entry| entry.type_id == TypeId::of::<T>()),
         "attempted to register channel for message type `{}` more than once",
-        std::any::type_name::<T>(),
+        type_name::<T>(),
     );
 
     let (tx, rx) = unbounded::<T>();
@@ -64,8 +65,9 @@ pub(crate) fn register_channel<T: Message>(app: &mut App) {
         .push(ChannelEntry {
             type_id: TypeId::of::<T>(),
             drain: Box::new(move |world: &mut World| {
-                let mut messages = world.resource_mut::<Messages<T>>();
-                messages.write_batch(rx.try_iter());
+                world
+                    .resource_mut::<Messages<T>>()
+                    .write_batch(rx.try_iter());
             }),
             sender: Box::new(tx),
         });
@@ -91,6 +93,6 @@ pub(crate) fn channel_sender<T: Message>(world: &World) -> Sender<T> {
         .sender
         .as_ref()
         .downcast_ref::<Sender<T>>()
-        .unwrap_or_else(|| panic!("unexpected type for sender`{}`", type_name::<T>(),))
+        .unwrap_or_else(|| panic!("unexpected type for sender `{}`", type_name::<T>(),))
         .clone()
 }

@@ -1,8 +1,4 @@
-//! Convenience aliases for reading `bevy_stdb` [`Message`](bevy_ecs::prelude::Message)s.
-//!
-//! This module groups the [`MessageReader`] aliases used for connection lifecycle
-//! messages and table update messages so system signatures can stay concise.
-
+//! [`MessageReader`] type aliases for connection lifecycle and table messages.
 use crate::message::{
     DeleteMessage, InsertMessage, InsertUpdateMessage, StdbConnectedMessage,
     StdbConnectionErrorMessage, StdbDisconnectedMessage, UpdateMessage,

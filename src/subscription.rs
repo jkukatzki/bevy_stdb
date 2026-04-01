@@ -1,22 +1,18 @@
-//! Subscription state and lifecycle for SpacetimeDB.
+//! Subscription state and lifecycle management for SpacetimeDB.
 //!
-//! This module stores subscription intent and applies it when a connection is active.
-
+//! Manages subscription intent and active handles via Bevy systems and resources.
 use crate::connection::{StdbConnection, StdbConnectionState};
 use bevy_app::{App, Plugin, PreUpdate};
-use bevy_ecs::{
-    prelude::Resource,
-    schedule::IntoScheduleConfigs,
-    system::{Res, ResMut},
-};
-use bevy_state::state::OnEnter;
+use bevy_ecs::prelude::{IntoScheduleConfigs, Res, ResMut, Resource};
+use bevy_state::prelude::OnEnter;
 use spacetimedb_sdk::{
     __codegen::{__query_builder::Query, DbConnection, SpacetimeModule, SubscriptionBuilder},
     DbContext, Result as StdbResult, SubscriptionHandle as StdbSubscriptionHandle,
 };
 use std::{collections::HashMap, hash::Hash, marker::PhantomData};
 
-type SubscriptionInitializer<K, M> = dyn Fn(&mut StdbSubscriptions<K, M>) + Send + Sync;
+pub(crate) type SubscriptionsInitializer = dyn Fn(&mut App) + Send + Sync;
+type SubscriptionStateInitializer<K, M> = dyn Fn(&mut StdbSubscriptions<K, M>) + Send + Sync;
 
 /// Stored subscription intent and active handle for a single key.
 struct SubscriptionEntry<H> {
@@ -28,9 +24,9 @@ struct SubscriptionEntry<H> {
     queued: bool,
 }
 
-/// A [`Resource`] that stores SpacetimeDB subscriptions in Bevy.
+/// SpacetimeDB subscription [`Resource`].
 ///
-/// Subscription intent is kept separately from active handles so it can be
+/// Keeps subscription intent separate from active handles so queries can be
 /// reapplied after reconnects.
 #[derive(Resource)]
 pub struct StdbSubscriptions<K, M>
@@ -39,7 +35,7 @@ where
     M: SpacetimeModule,
     M::SubscriptionHandle: StdbSubscriptionHandle + Send + Sync + 'static,
 {
-    /// Stored subscription entries keyed by logical subscription key.
+    /// Subscription entries keyed by user-defined subscription key.
     entries: HashMap<K, SubscriptionEntry<M::SubscriptionHandle>>,
 }
 
@@ -98,8 +94,6 @@ where
             return Ok(());
         };
 
-        entry.queued = false;
-
         if let Some(handle) = entry.handle.take() {
             handle.unsubscribe()?;
         }
@@ -155,7 +149,7 @@ where
         self.entries.values().any(|entry| entry.queued)
     }
 
-    /// Applies queued subscriptions to the active connection.
+    /// Sends queued subscriptions to the active connection.
     fn apply_queued<C>(&mut self, conn: &StdbConnection<C>)
     where
         C: DbConnection<Module = M>
@@ -191,7 +185,7 @@ where
     M: SpacetimeModule<DbConnection = C>,
     M::SubscriptionHandle: StdbSubscriptionHandle + Send + Sync + 'static,
 {
-    initializer: Box<SubscriptionInitializer<K, M>>,
+    initializer: Box<SubscriptionStateInitializer<K, M>>,
     _marker: PhantomData<(C, M)>,
 }
 
@@ -206,7 +200,9 @@ where
     M: SpacetimeModule<DbConnection = C>,
     M::SubscriptionHandle: StdbSubscriptionHandle + Send + Sync + 'static,
 {
-    pub fn new(initializer: impl Fn(&mut StdbSubscriptions<K, M>) + Send + Sync + 'static) -> Self {
+    pub(crate) fn new(
+        initializer: impl Fn(&mut StdbSubscriptions<K, M>) + Send + Sync + 'static,
+    ) -> Self {
         Self {
             initializer: Box::new(initializer),
             _marker: PhantomData,
@@ -228,11 +224,7 @@ where
     /// Installs the subscription resource and lifecycle systems.
     fn build(&self, app: &mut App) {
         app.init_resource::<StdbSubscriptions<K, M>>();
-
-        let mut subs = app
-            .world_mut()
-            .get_resource_mut::<StdbSubscriptions<K, M>>()
-            .expect("StdbSubscriptions should be initialized during plugin build");
+        let mut subs = app.world_mut().resource_mut::<StdbSubscriptions<K, M>>();
         (self.initializer)(&mut subs);
 
         app.add_systems(
@@ -259,7 +251,7 @@ where
     subs.has_queued() && *state.get() == StdbConnectionState::Connected
 }
 
-/// Re-queues stored subscriptions after a disconnect.
+/// Unsubscribes active handles and re-queues them for the next connection.
 fn queue_subscriptions_on_disconnect<K, M>(mut subs: ResMut<StdbSubscriptions<K, M>>)
 where
     K: Eq + Hash + Clone + Send + Sync + 'static,
@@ -274,7 +266,7 @@ where
     }
 }
 
-/// Applies queued subscriptions to the current connection.
+/// Sends queued subscriptions to the current connection.
 fn apply_queued_subscriptions<K, C, M>(
     conn: Res<StdbConnection<C>>,
     mut subs: ResMut<StdbSubscriptions<K, M>>,

@@ -1,22 +1,15 @@
 //! Reconnect policy and runtime state for SpacetimeDB connections.
 //!
-//! This module manages reconnect timing and backoff through Bevy systems.
-//!
-//! `Connected` and `Disconnected` are treated as SDK-driven states and should
-//! only be entered in response to the connection callbacks forwarded through
-//! `StdbConnectedMessage`, `StdbDisconnectedMessage`, and
-//! `StdbConnectionErrorMessage`.
-//!
-//! The reconnect plugin owns the policy-oriented states instead:
-//! - `Reconnecting` while retry attempts are pending
-//! - `Exhausted` when retry attempts have been exhausted
+//! Manages reconnect timing and backoff, and reconnect policy
+//! states (Reconnecting, Exhausted) via Bevy systems.
 
 use crate::connection::{
     ConnectionDriver, StdbConnectionConfig, StdbConnectionState, activate_connection,
 };
 #[cfg(feature = "browser")]
 use crate::connection::{
-    begin_browser_connection_build, poll_browser_connection_build, take_pending_connection_result,
+    PendingConnectionState, begin_browser_connection_build, poll_browser_connection_build,
+    take_pending_connection_result,
 };
 use bevy_app::{App, Plugin, PreUpdate};
 use bevy_ecs::prelude::{IntoScheduleConfigs, Res, ResMut, Resource, World};
@@ -39,6 +32,9 @@ pub struct StdbReconnectOptions {
     /// If `None`, retries indefinitely.
     pub max_attempts: Option<u32>,
     /// Multiplier applied after each failed reconnect attempt.
+    ///
+    /// Values below `1.0` are clamped to `1.0` to prevent the delay from
+    /// shrinking between attempts.
     pub backoff_factor: f32,
     /// Maximum delay between reconnect attempts.
     pub max_delay: Duration,
@@ -57,17 +53,17 @@ impl Default for StdbReconnectOptions {
 
 /// Runtime reconnect configuration.
 #[derive(Resource, Clone)]
-pub(crate) struct ReconnectConfig {
+struct ReconnectConfig {
     /// Delay before the first reconnect attempt after a disconnect.
-    pub initial_delay: Duration,
+    initial_delay: Duration,
     /// Maximum number of reconnect attempts before giving up.
     ///
     /// If `None`, retries indefinitely.
-    pub max_attempts: Option<u32>,
+    max_attempts: Option<u32>,
     /// Multiplier applied after each failed reconnect attempt.
-    pub backoff_factor: f32,
+    backoff_factor: f32,
     /// Maximum delay between reconnect attempts.
-    pub max_delay: Duration,
+    max_delay: Duration,
 }
 
 impl From<StdbReconnectOptions> for ReconnectConfig {
@@ -83,10 +79,10 @@ impl From<StdbReconnectOptions> for ReconnectConfig {
 
 /// Runtime state for reconnect attempts.
 #[derive(Resource)]
-pub(crate) struct ReconnectState {
-    pub attempts: u32,
-    pub current_delay: Duration,
-    pub timer: Option<Timer>,
+struct ReconnectState {
+    attempts: u32,
+    current_delay: Duration,
+    timer: Option<Timer>,
 }
 
 impl Default for ReconnectState {
@@ -114,8 +110,8 @@ where
     C: DbConnection<Module = M> + DbContext + Send + Sync,
     M: SpacetimeModule<DbConnection = C>,
 {
-    /// Creates a reconnect plugin from the given options.
-    pub fn new(reconnect_options: StdbReconnectOptions) -> Self {
+    /// Creates a new [`ReconnectPlugin`] with the given options.
+    pub(crate) fn new(reconnect_options: StdbReconnectOptions) -> Self {
         Self {
             reconnect_options,
             _marker: std::marker::PhantomData,
@@ -187,7 +183,7 @@ where
         return;
     }
 
-    if world.contains_resource::<crate::connection::PendingConnectionState<C>>() {
+    if world.contains_resource::<PendingConnectionState<C>>() {
         return;
     }
 

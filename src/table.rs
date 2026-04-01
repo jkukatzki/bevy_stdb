@@ -1,16 +1,13 @@
-//! Table registration for SpacetimeDB message forwarding.
+//! Table registration and message forwarding for SpacetimeDB.
 //!
-//! This module provides helpers for:
-//! - registering Bevy messages for a table row type during app setup
-//! - binding SpacetimeDB table callbacks later when a connection is active
-//! - exposing small per-kind binder helpers so plugin APIs can use `reg.bind(...)`
-
+//! Registers Bevy message channels and binds SDK table callbacks to
+//! forward events as `Insert`, `Update`, `Delete`, and `InsertUpdate` messages.
 use crate::{
     channel_bridge::{channel_sender, register_channel},
     message::{DeleteMessage, InsertMessage, InsertUpdateMessage, UpdateMessage},
 };
 use bevy_app::App;
-use bevy_ecs::world::World;
+use bevy_ecs::prelude::World;
 use spacetimedb_sdk::{EventTable, Table, TableWithPrimaryKey};
 use std::marker::PhantomData;
 
@@ -47,7 +44,10 @@ impl<'w, TRow> TableBinder<'w, TRow> {
         TRow: Send + Sync + Clone + 'static,
         TTable: Table<Row = TRow> + TableWithPrimaryKey<Row = TRow>,
     {
-        bind_table::<TRow, TTable>(self.world, &table);
+        bind_insert::<TRow, TTable>(self.world, &table);
+        bind_delete::<TRow, TTable>(self.world, &table);
+        bind_update::<TRow, TTable>(self.world, &table);
+        bind_insert_update::<TRow, TTable>(self.world, &table);
     }
 }
 
@@ -75,7 +75,8 @@ impl<'w, TRow> TableWithoutPkBinder<'w, TRow> {
         TRow: Send + Sync + Clone + 'static,
         TTable: Table<Row = TRow>,
     {
-        bind_table_without_pk::<TRow, TTable>(self.world, &table);
+        bind_insert::<TRow, TTable>(self.world, &table);
+        bind_delete::<TRow, TTable>(self.world, &table);
     }
 }
 
@@ -103,7 +104,8 @@ impl<'w, TRow> ViewBinder<'w, TRow> {
         TRow: Send + Sync + Clone + 'static,
         TTable: Table<Row = TRow>,
     {
-        bind_view::<TRow, TTable>(self.world, &table);
+        bind_insert::<TRow, TTable>(self.world, &table);
+        bind_delete::<TRow, TTable>(self.world, &table);
     }
 }
 
@@ -124,16 +126,18 @@ impl<'w, TRow> EventTableBinder<'w, TRow> {
         }
     }
 
+    /// Binds the default SpacetimeDB callbacks for `table` and forwards them as
+    /// Bevy messages.
     pub fn bind<TTable>(self, table: TTable)
     where
         TRow: Send + Sync + Clone + 'static,
         TTable: Table<Row = TRow> + EventTable,
     {
-        bind_event_table::<TRow, TTable>(self.world, &table);
+        bind_insert::<TRow, TTable>(self.world, &table);
     }
 }
 
-/// Registers the Bevy messages for a table with a primary key.
+/// Registers Bevy message channels for a table with a primary key.
 pub(crate) fn register_table<TRow>(app: &mut App)
 where
     TRow: Send + Sync + Clone + 'static,
@@ -144,7 +148,7 @@ where
     register_channel::<InsertUpdateMessage<TRow>>(app);
 }
 
-/// Registers the Bevy messages for a table without a primary key.
+/// Registers Bevy message channels for a table without a primary key.
 pub(crate) fn register_table_without_pk<TRow>(app: &mut App)
 where
     TRow: Send + Sync + Clone + 'static,
@@ -153,7 +157,7 @@ where
     register_channel::<DeleteMessage<TRow>>(app);
 }
 
-/// Registers the Bevy messages for a view.
+/// Registers Bevy message channels for a view.
 pub(crate) fn register_view<TRow>(app: &mut App)
 where
     TRow: Send + Sync + Clone + 'static,
@@ -161,7 +165,7 @@ where
     register_table_without_pk::<TRow>(app);
 }
 
-/// Registers the Bevy messages for an event table.
+/// Registers Bevy message channels for an event table.
 pub(crate) fn register_event_table<TRow>(app: &mut App)
 where
     TRow: Send + Sync + Clone + 'static,
@@ -169,47 +173,7 @@ where
     register_channel::<InsertMessage<TRow>>(app);
 }
 
-/// Binds all callbacks for a table with a primary key.
-pub(crate) fn bind_table<TRow, TTable>(world: &World, table: &TTable)
-where
-    TRow: Send + Sync + Clone + 'static,
-    TTable: Table<Row = TRow> + TableWithPrimaryKey<Row = TRow>,
-{
-    bind_insert::<TRow, TTable>(world, table);
-    bind_delete::<TRow, TTable>(world, table);
-    bind_update::<TRow, TTable>(world, table);
-    bind_insert_update::<TRow, TTable>(world, table);
-}
-
-/// Binds insert and delete callbacks for a table without a primary key.
-pub(crate) fn bind_table_without_pk<TRow, TTable>(world: &World, table: &TTable)
-where
-    TRow: Send + Sync + Clone + 'static,
-    TTable: Table<Row = TRow>,
-{
-    bind_insert::<TRow, TTable>(world, table);
-    bind_delete::<TRow, TTable>(world, table);
-}
-
-/// Binds insert and delete callbacks for a view.
-pub(crate) fn bind_view<TRow, TTable>(world: &World, table: &TTable)
-where
-    TRow: Send + Sync + Clone + 'static,
-    TTable: Table<Row = TRow>,
-{
-    bind_table_without_pk::<TRow, TTable>(world, table);
-}
-
-/// Binds insert callbacks for an event table.
-pub(crate) fn bind_event_table<TRow, TTable>(world: &World, table: &TTable)
-where
-    TRow: Send + Sync + Clone + 'static,
-    TTable: Table<Row = TRow> + EventTable,
-{
-    bind_insert::<TRow, TTable>(world, table);
-}
-
-pub(crate) fn bind_insert<TRow, TTable>(world: &World, table: &TTable)
+fn bind_insert<TRow, TTable>(world: &World, table: &TTable)
 where
     TRow: Send + Sync + Clone + 'static,
     TTable: Table<Row = TRow>,
@@ -220,7 +184,7 @@ where
     });
 }
 
-pub(crate) fn bind_delete<TRow, TTable>(world: &World, table: &TTable)
+fn bind_delete<TRow, TTable>(world: &World, table: &TTable)
 where
     TRow: Send + Sync + Clone + 'static,
     TTable: Table<Row = TRow>,
@@ -231,7 +195,7 @@ where
     });
 }
 
-pub(crate) fn bind_update<TRow, TTable>(world: &World, table: &TTable)
+fn bind_update<TRow, TTable>(world: &World, table: &TTable)
 where
     TRow: Send + Sync + Clone + 'static,
     TTable: Table<Row = TRow> + TableWithPrimaryKey<Row = TRow>,
@@ -245,7 +209,7 @@ where
     });
 }
 
-pub(crate) fn bind_insert_update<TRow, TTable>(world: &World, table: &TTable)
+fn bind_insert_update<TRow, TTable>(world: &World, table: &TTable)
 where
     TRow: Send + Sync + Clone + 'static,
     TTable: Table<Row = TRow> + TableWithPrimaryKey<Row = TRow>,
