@@ -4,7 +4,10 @@
 //! a connection request is issued through [`StdbConnectionController`]
 //! and the connection module handles the actual connection building.
 
-use crate::connection::{StdbConnectionController, StdbConnectionState};
+use crate::{
+    connection::{StdbConnectionController, StdbConnectionState},
+    set::StdbSet,
+};
 use bevy_app::{App, Plugin, PreUpdate};
 use bevy_ecs::prelude::{IntoScheduleConfigs, Res, ResMut, Resource};
 use bevy_state::prelude::{NextState, OnEnter, in_state};
@@ -13,7 +16,7 @@ use spacetimedb_sdk::{
     __codegen::{DbConnection, SpacetimeModule},
     DbContext,
 };
-use std::time::Duration;
+use std::{marker::PhantomData, time::Duration};
 
 /// Reconnect options for a SpacetimeDB connection.
 #[derive(Clone, Debug)]
@@ -101,7 +104,7 @@ where
     M: SpacetimeModule<DbConnection = C>,
 {
     reconnect_options: StdbReconnectOptions,
-    _marker: std::marker::PhantomData<(C, M)>,
+    _marker: PhantomData<(C, M)>,
 }
 
 impl<C, M> ReconnectPlugin<C, M>
@@ -113,7 +116,7 @@ where
     pub(crate) fn new(reconnect_options: StdbReconnectOptions) -> Self {
         Self {
             reconnect_options,
-            _marker: std::marker::PhantomData,
+            _marker: PhantomData,
         }
     }
 }
@@ -139,7 +142,9 @@ impl<
 
         app.add_systems(
             PreUpdate,
-            tick_reconnect_timer.run_if(in_state(StdbConnectionState::Disconnected)),
+            tick_reconnect_timer
+                .in_set(StdbSet::Connection)
+                .run_if(in_state(StdbConnectionState::Disconnected)),
         );
     }
 }

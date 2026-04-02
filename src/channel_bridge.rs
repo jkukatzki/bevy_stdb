@@ -1,10 +1,11 @@
 //! Channel-backed message delivery for Bevy.
 //!
 //! Registers per-type channels and forwards messages from those
-//! channels into Bevy `Messages<T>`, such as SpacetimeDB table events
+//! channels into Bevy [`Messages<T>`](bevy_ecs::prelude::Messages), such as SpacetimeDB table events
 //! or connection lifecycle messages.
+use crate::set::StdbSet;
 use bevy_app::{App, Plugin, PreUpdate};
-use bevy_ecs::prelude::{Message, Messages, Mut, Resource, World};
+use bevy_ecs::prelude::{IntoScheduleConfigs, Message, Messages, Mut, Resource, World};
 use crossbeam_channel::{Sender, unbounded};
 use std::any::{Any, TypeId, type_name};
 
@@ -18,16 +19,18 @@ struct ChannelEntry {
     sender: Box<dyn Any + Send + Sync>,
 }
 
+/// Registry of per-type message channels.
 #[derive(Resource, Default)]
 struct ChannelRegistry {
     channels: Vec<ChannelEntry>,
 }
 
+/// Initializes the channel registry and installs the per-frame drain system.
 pub(crate) struct ChannelBridgePlugin;
 impl Plugin for ChannelBridgePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ChannelRegistry>();
-        app.add_systems(PreUpdate, drain_channels);
+        app.add_systems(PreUpdate, drain_channels.in_set(StdbSet::Flush));
     }
 }
 
@@ -43,6 +46,7 @@ fn drain_channels(world: &mut World) {
 /// Registers a channel for message type `T`.
 ///
 /// # Panics
+///
 /// Panics if [`ChannelRegistry`] has not been initialized or if the
 /// channel for `T` has already been registered.
 pub(crate) fn register_channel<T: Message>(app: &mut App) {

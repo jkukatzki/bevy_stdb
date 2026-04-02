@@ -2,6 +2,7 @@ use crate::{
     channel_bridge::ChannelBridgePlugin,
     connection::{ConnectionDriver, StdbConnectionPlugin},
     reconnect::{ReconnectPlugin, StdbReconnectOptions},
+    set::StdbSet,
     subscription::{StdbSubscriptions, SubscriptionsInitializer, SubscriptionsPlugin},
     table::{
         EventTableBinder, TableBindCallback, TableBinder, TableRegistrationCallback,
@@ -9,7 +10,8 @@ use crate::{
         register_table_without_pk, register_view,
     },
 };
-use bevy_app::{App, Plugin};
+use bevy_app::{App, Plugin, PreStartup, PreUpdate};
+use bevy_ecs::prelude::IntoScheduleConfigs;
 use bevy_state::app::StatesPlugin;
 use spacetimedb_sdk::{
     __codegen::{DbConnection, SpacetimeModule},
@@ -168,6 +170,7 @@ impl<C: DbConnection<Module = M> + DbContext + Send + Sync, M: SpacetimeModule<D
     /// Sets the remote module name.
     ///
     /// # Panics
+    ///
     /// Panics if called more than once.
     pub fn with_module_name(mut self, name: impl Into<String>) -> Self {
         assert!(
@@ -181,6 +184,7 @@ impl<C: DbConnection<Module = M> + DbContext + Send + Sync, M: SpacetimeModule<D
     /// Sets the SpacetimeDB host URI.
     ///
     /// # Panics
+    ///
     /// Panics if called more than once.
     pub fn with_uri(mut self, uri: impl Into<String>) -> Self {
         assert!(self.uri.is_none(), "`with_uri()` may only be called once");
@@ -195,6 +199,7 @@ impl<C: DbConnection<Module = M> + DbContext + Send + Sync, M: SpacetimeModule<D
     /// stored token used for subsequent reconnect attempts.
     ///
     /// # Panics
+    ///
     /// Panics if called more than once.
     pub fn with_token(mut self, token: impl Into<String>) -> Self {
         assert!(
@@ -208,6 +213,7 @@ impl<C: DbConnection<Module = M> + DbContext + Send + Sync, M: SpacetimeModule<D
     /// Sets the connection compression mode.
     ///
     /// # Panics
+    ///
     /// Panics if called more than once.
     pub fn with_compression(mut self, compression: Compression) -> Self {
         assert!(
@@ -219,6 +225,8 @@ impl<C: DbConnection<Module = M> + DbContext + Send + Sync, M: SpacetimeModule<D
     }
 
     /// Registers a table with a primary key.
+    ///
+    /// # Example
     ///
     /// ```ignore
     /// .add_table::<PlayerRow>(|reg, db| reg.bind(db.player_info()))
@@ -240,6 +248,8 @@ impl<C: DbConnection<Module = M> + DbContext + Send + Sync, M: SpacetimeModule<D
     }
 
     /// Registers a table without a primary key.
+    ///
+    /// # Example
     ///
     /// ```ignore
     /// .add_table_without_pk::<NearbyMonsterRow>(|reg, db| {
@@ -264,6 +274,8 @@ impl<C: DbConnection<Module = M> + DbContext + Send + Sync, M: SpacetimeModule<D
 
     /// Registers a view.
     ///
+    /// # Example
+    ///
     /// ```ignore
     /// .add_view::<CharacterRow>(|reg, db| reg.bind(db.character_selection_screen_view()))
     /// ```
@@ -284,6 +296,8 @@ impl<C: DbConnection<Module = M> + DbContext + Send + Sync, M: SpacetimeModule<D
     }
 
     /// Registers an event table.
+    ///
+    /// # Example
     ///
     /// ```ignore
     /// .add_event_table::<LogEvent>(|reg, db| reg.bind(db.log_events()))
@@ -454,6 +468,18 @@ impl<
             app.add_plugins(StatesPlugin);
         }
         app.add_plugins(ChannelBridgePlugin);
+
+        app.configure_sets(PreStartup, StdbSet::Connection);
+        app.configure_sets(
+            PreUpdate,
+            (
+                StdbSet::Flush,
+                StdbSet::StateSync,
+                StdbSet::Connection,
+                StdbSet::Subscriptions,
+            )
+                .chain(),
+        );
 
         if let Some(reconnect_options) = self.reconnect_options.clone() {
             app.add_plugins(ReconnectPlugin::<C, M>::new(reconnect_options));

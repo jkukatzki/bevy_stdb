@@ -61,7 +61,7 @@
 //! ```
 //!
 //! See the [`StdbPlugin`](crate::prelude::StdbPlugin) docs for the full
-//! builder API and the [README](https://github.com/AurorasVeil/bevy_stdb)
+//! builder API and the [README](https://github.com/onx2/bevy_stdb)
 //! for detailed guides on connection driving, table registration,
 //! subscriptions, and delayed connections.
 pub(crate) mod channel_bridge;
@@ -71,6 +71,7 @@ mod connection;
 mod message;
 mod plugin;
 mod reconnect;
+mod set;
 mod subscription;
 mod table;
 
@@ -89,6 +90,7 @@ pub mod prelude {
         },
         plugin::StdbPlugin,
         reconnect::StdbReconnectOptions,
+        set::StdbSet,
         subscription::StdbSubscriptions,
     };
 }
