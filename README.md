@@ -1,6 +1,7 @@
 # bevy_stdb
 
 A [Bevy](https://bevy.org/) integration for [SpacetimeDB](https://spacetimedb.com).
+
 [![crates.io](https://img.shields.io/crates/v/bevy_stdb)](https://crates.io/crates/bevy_stdb)
 [![docs.rs](https://docs.rs/bevy_stdb/badge.svg)](https://docs.rs/bevy_stdb)
 
