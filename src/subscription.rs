@@ -4,7 +4,7 @@
 use crate::connection::{StdbConnection, StdbConnectionState};
 use bevy_app::{App, Plugin, PreUpdate};
 use bevy_ecs::prelude::{IntoScheduleConfigs, Res, ResMut, Resource};
-use bevy_state::prelude::OnEnter;
+use bevy_state::prelude::{OnEnter, State};
 use spacetimedb_sdk::{
     __codegen::{__query_builder::Query, DbConnection, SpacetimeModule, SubscriptionBuilder},
     DbContext, Result as StdbResult, SubscriptionHandle as StdbSubscriptionHandle,
@@ -241,7 +241,7 @@ where
 
 fn should_apply_subscriptions<K, M>(
     subs: Res<StdbSubscriptions<K, M>>,
-    state: Res<bevy_state::state::State<StdbConnectionState>>,
+    state: Res<State<StdbConnectionState>>,
 ) -> bool
 where
     K: Eq + Hash + Clone + Send + Sync + 'static,
@@ -251,7 +251,7 @@ where
     subs.has_queued() && *state.get() == StdbConnectionState::Connected
 }
 
-/// Unsubscribes active handles and re-queues them for the next connection.
+/// Re-queues all active subscriptions for re-application after a disconnect.
 fn queue_subscriptions_on_disconnect<K, M>(mut subs: ResMut<StdbSubscriptions<K, M>>)
 where
     K: Eq + Hash + Clone + Send + Sync + 'static,
@@ -259,8 +259,7 @@ where
     M::SubscriptionHandle: StdbSubscriptionHandle + Send + Sync + 'static,
 {
     for entry in subs.entries.values_mut() {
-        if let Some(handle) = entry.handle.take() {
-            let _ = handle.unsubscribe();
+        if entry.handle.take().is_some() {
             entry.queued = true;
         }
     }
