@@ -2,12 +2,15 @@
 //!
 //! Manages subscription intent and active handles via Bevy systems and resources.
 use crate::{
+    channel_bridge::{channel_sender, register_channel},
     connection::{StdbConnection, StdbConnectionState},
+    message::{StdbSubscriptionAppliedMessage, StdbSubscriptionErrorMessage},
     set::StdbSet,
 };
 use bevy_app::{App, Plugin, PreUpdate};
 use bevy_ecs::prelude::{IntoScheduleConfigs, Res, ResMut, Resource};
 use bevy_state::prelude::{OnEnter, State};
+use crossbeam_channel::Sender;
 use spacetimedb_sdk::{
     __codegen::{__query_builder::Query, DbConnection, SpacetimeModule, SubscriptionBuilder},
     DbContext, Result as StdbResult, SubscriptionHandle as StdbSubscriptionHandle,
@@ -40,19 +43,10 @@ where
 {
     /// Subscription entries keyed by user-defined subscription key.
     entries: HashMap<K, SubscriptionEntry<M::SubscriptionHandle>>,
-}
-
-impl<K, M> Default for StdbSubscriptions<K, M>
-where
-    K: Eq + Hash + Clone + Send + Sync + 'static,
-    M: SpacetimeModule,
-    M::SubscriptionHandle: StdbSubscriptionHandle + Send + Sync + 'static,
-{
-    fn default() -> Self {
-        Self {
-            entries: HashMap::new(),
-        }
-    }
+    /// Sender for subscription applied lifecycle messages.
+    applied_sender: Sender<StdbSubscriptionAppliedMessage<K>>,
+    /// Sender for subscription error lifecycle messages.
+    error_sender: Sender<StdbSubscriptionErrorMessage<K>>,
 }
 
 impl<K, M> StdbSubscriptions<K, M>
@@ -162,15 +156,30 @@ where
             + 'static,
         M: SpacetimeModule<DbConnection = C>,
     {
-        for entry in self.entries.values_mut() {
-            if !entry.queued {
-                continue;
-            }
+        for (key, entry) in self.entries.iter_mut().filter(|(_, entry)| entry.queued) {
+            let applied_key = key.clone();
+            let applied_sender = self.applied_sender.clone();
+            let error_key = key.clone();
+            let error_sender = self.error_sender.clone();
 
-            let handle = conn.subscription_builder().subscribe(entry.sql.as_str());
+            let handle = conn
+                .subscription_builder()
+                .on_applied(move |_ctx| {
+                    let _ =
+                        applied_sender.send(StdbSubscriptionAppliedMessage { key: applied_key });
+                })
+                .on_error(move |_ctx, err| {
+                    let _ = error_sender.send(StdbSubscriptionErrorMessage {
+                        key: error_key,
+                        err,
+                    });
+                })
+                .subscribe(entry.sql.as_str());
+
             if let Some(old_handle) = entry.handle.replace(handle) {
                 let _ = old_handle.unsubscribe();
             }
+
             entry.queued = false;
         }
     }
@@ -226,7 +235,16 @@ where
 {
     /// Installs the subscription resource and lifecycle systems.
     fn build(&self, app: &mut App) {
-        app.init_resource::<StdbSubscriptions<K, M>>();
+        register_channel::<StdbSubscriptionAppliedMessage<K>>(app);
+        register_channel::<StdbSubscriptionErrorMessage<K>>(app);
+
+        let world = app.world();
+        app.insert_resource(StdbSubscriptions::<K, M> {
+            entries: HashMap::default(),
+            applied_sender: channel_sender::<StdbSubscriptionAppliedMessage<K>>(world),
+            error_sender: channel_sender::<StdbSubscriptionErrorMessage<K>>(world),
+        });
+
         let mut subs = app.world_mut().resource_mut::<StdbSubscriptions<K, M>>();
         (self.initializer)(&mut subs);
 

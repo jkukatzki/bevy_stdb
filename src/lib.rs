@@ -81,12 +81,14 @@ pub mod prelude {
         alias::{
             ReadDeleteMessage, ReadInsertMessage, ReadInsertUpdateMessage,
             ReadStdbConnectedMessage, ReadStdbConnectionErrorMessage, ReadStdbDisconnectedMessage,
+            ReadStdbSubscriptionAppliedMessage, ReadStdbSubscriptionErrorMessage,
             ReadUpdateMessage,
         },
         connection::{StdbConnection, StdbConnectionController, StdbConnectionState},
         message::{
             DeleteMessage, InsertMessage, InsertUpdateMessage, StdbConnectedMessage,
-            StdbConnectionErrorMessage, StdbDisconnectedMessage, UpdateMessage,
+            StdbConnectionErrorMessage, StdbDisconnectedMessage, StdbSubscriptionAppliedMessage,
+            StdbSubscriptionErrorMessage, UpdateMessage,
         },
         plugin::StdbPlugin,
         reconnect::StdbReconnectOptions,
