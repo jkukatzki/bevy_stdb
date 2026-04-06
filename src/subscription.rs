@@ -18,7 +18,6 @@ use spacetimedb_sdk::{
 use std::{collections::HashMap, hash::Hash, marker::PhantomData};
 
 pub(crate) type SubscriptionsInitializer = dyn Fn(&mut App) + Send + Sync;
-type SubscriptionStateInitializer<K, M> = dyn Fn(&mut StdbSubscriptions<K, M>) + Send + Sync;
 
 /// Stored subscription intent and active handle for a single key.
 struct SubscriptionEntry<H> {
@@ -197,11 +196,10 @@ where
     M: SpacetimeModule<DbConnection = C>,
     M::SubscriptionHandle: StdbSubscriptionHandle + Send + Sync + 'static,
 {
-    initializer: Box<SubscriptionStateInitializer<K, M>>,
-    _marker: PhantomData<(C, M)>,
+    _marker: PhantomData<(K, C, M)>,
 }
 
-impl<K, C, M> SubscriptionsPlugin<K, C, M>
+impl<K, C, M> Default for SubscriptionsPlugin<K, C, M>
 where
     K: Eq + Hash + Clone + Send + Sync + 'static,
     C: DbConnection<Module = M>
@@ -212,11 +210,8 @@ where
     M: SpacetimeModule<DbConnection = C>,
     M::SubscriptionHandle: StdbSubscriptionHandle + Send + Sync + 'static,
 {
-    pub(crate) fn new(
-        initializer: impl Fn(&mut StdbSubscriptions<K, M>) + Send + Sync + 'static,
-    ) -> Self {
+    fn default() -> Self {
         Self {
-            initializer: Box::new(initializer),
             _marker: PhantomData,
         }
     }
@@ -244,9 +239,6 @@ where
             applied_sender: channel_sender::<StdbSubscriptionAppliedMessage<K>>(world),
             error_sender: channel_sender::<StdbSubscriptionErrorMessage<K>>(world),
         });
-
-        let mut subs = app.world_mut().resource_mut::<StdbSubscriptions<K, M>>();
-        (self.initializer)(&mut subs);
 
         app.add_systems(
             OnEnter(StdbConnectionState::Disconnected),
