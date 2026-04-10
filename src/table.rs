@@ -149,12 +149,19 @@ impl<'w, TRow> EventTableBinder<'w, TRow> {
     where
         TRow: Send + Sync + Clone + InModule + 'static,
         RowEvent<TRow>: Send + Sync,
-        TTable: Table<
+        TTable: EventTable<
                 Row = TRow,
                 EventContext = <<TRow as InModule>::Module as SpacetimeModule>::EventContext,
-            > + EventTable,
+            >,
+        TTable::EventContext: AbstractEventContext<Event = RowEvent<TRow>>,
     {
-        bind_insert::<TRow, TTable>(self.world, &table);
+        let sender = channel_sender::<InsertMessage<TRow>>(self.world);
+        table.on_insert(move |ctx, row| {
+            let _ = sender.send(InsertMessage {
+                event: ctx.event().clone(),
+                row: row.clone(),
+            });
+        });
     }
 }
 
