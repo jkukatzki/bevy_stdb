@@ -91,7 +91,7 @@ pub mod prelude {
             ReadStdbSubscriptionAppliedMessage, ReadStdbSubscriptionErrorMessage,
             ReadUpdateMessage,
         },
-        connection::{StdbConnection, StdbConnectionController, StdbConnectionState},
+        connection::{StdbConnection, StdbConnectionController, StdbConnectionState, StdbConnectionConfig},
         message::{
             DeleteMessage, InsertMessage, InsertUpdateMessage, StdbConnectedMessage,
             StdbConnectionErrorMessage, StdbDisconnectedMessage, StdbSubscriptionAppliedMessage,

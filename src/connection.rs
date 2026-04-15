@@ -142,7 +142,7 @@ pub(crate) enum ConnectionDriver<C: DbContext + Send + Sync + 'static> {
 
 /// Runtime configuration for the active SpacetimeDB connection.
 #[derive(Resource)]
-pub(crate) struct StdbConnectionConfig<
+pub struct StdbConnectionConfig<
     C: DbConnection<Module = M> + DbContext + Send + Sync,
     M: SpacetimeModule<DbConnection = C>,
 > {
@@ -206,6 +206,16 @@ where
     C: DbConnection<Module = M> + DbContext + Send + Sync,
     M: SpacetimeModule<DbConnection = C>,
 {
+    /// Updates the URI used for future connection attempts.
+    pub fn set_uri(&mut self, uri: impl Into<String>) {
+        self.uri = uri.into();
+    }
+
+    /// Returns the current URI.
+    pub fn uri(&self) -> &str {
+        &self.uri
+    }
+
     /// Produces a configured [`DbConnectionBuilder`] for this connection.
     fn connection_builder(&self) -> DbConnectionBuilder<M> {
         let connected_tx = self.connected_tx.clone();
@@ -441,7 +451,8 @@ impl<
                 .run_if(
                     in_state(StdbConnectionState::Uninitialized)
                         .or(in_state(StdbConnectionState::Connecting))
-                        .or(in_state(StdbConnectionState::Disconnected)),
+                        .or(in_state(StdbConnectionState::Disconnected))
+                        .or(in_state(StdbConnectionState::Exhausted)),
                 ),
         );
 
