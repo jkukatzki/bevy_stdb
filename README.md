@@ -435,3 +435,40 @@ fn example_system(conn: Res<StdbConn>, mut subs: ResMut<StdbSubs>) {
 This crate focuses on table-driven client workflows. Reducer and procedure access still exist through the active `StdbConnection`, but the primary Bevy-facing flow uses message readers for table events. When you need a reducer/procedure completion (or any off-schedule callback) back in the ECS, bridge it with `add_channel_message` / `StdbChannels` as shown in [Reducer and procedure callbacks](#reducer-and-procedure-callbacks).
 
 Special thanks to [`bevy_spacetimedb`](https://docs.rs/bevy_spacetimedb/) for the inspiration!
+
+## Clearing credentials
+
+A connection token is retained in the plugin's configuration so reconnecting can
+reuse the same account. `StdbConnectOptions::default()` sets `token` to `None`,
+which means “keep the configured token,” not “connect without credentials.”
+This matters when logging out:
+
+```text
+Login with token A -> configuration retains A -> connected as account A
+Logout            -> close the connection    -> configuration still retains A
+Connect(default)  -> reuse A                 -> connected as account A again
+```
+
+`clear_token()` explicitly removes the retained credential. The logout flow then
+becomes:
+
+```text
+Disconnect -> clear the configured token -> connect without a token -> guest
+```
+
+Using the `StdbCmds` alias defined above, run this system when the user requests
+logout, rather than on every frame:
+
+```rust
+fn return_to_guest(mut stdb: StdbCmds) {
+    stdb.disconnect();
+    stdb.clear_token();
+    stdb.connect(StdbConnectOptions::default());
+}
+```
+
+These calls queue Bevy commands; their effects occur when the command queue is
+applied. Queue `disconnect()`, `clear_token()`, and `connect()` together and
+in that order. A `None` token in the connect options retains the configured
+token; `clear_token()` explicitly removes it for future attempts. Changing the
+configured token does not change the identity of an already-open connection.

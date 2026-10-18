@@ -93,6 +93,19 @@ where
         self.commands.queue(DisconnectCommand::<C>::new());
     }
 
+    /// Clears the retained authentication token for future connection attempts.
+    ///
+    /// This does not change an active connection. Disconnect first, then clear
+    /// the token before connecting as a guest. A connect option of `None` keeps
+    /// the configured token; use this command to explicitly remove it.
+    pub fn clear_token(&mut self) {
+        self.commands.queue(|world: &mut World| {
+            if let Some(mut config) = world.get_resource_mut::<StdbConnectionConfig<C, M>>() {
+                config.token = None;
+            }
+        });
+    }
+
     /// Sets the authentication token in the SpacetimeDB connection config.
     ///
     /// This does not immediately reconnect with the new token but instead
