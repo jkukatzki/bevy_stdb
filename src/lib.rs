@@ -104,6 +104,8 @@ mod table;
 
 /// Common imports for `bevy_stdb`.
 pub mod prelude {
+    /// The generation-tagged channel sender returned by [`StdbChannels::sender`].
+    pub use crate::channel_bridge::Sender;
     pub use crate::{
         channel_bridge::StdbChannels,
         commands::{StdbCommands, StdbConnectOptions},
@@ -126,8 +128,4 @@ pub mod prelude {
         subscription::StdbSubscriptions,
         table::{OnDelete, OnInsert, OnUpdate, TableCapability, TableSource},
     };
-    /// The channel sender returned by [`StdbChannels::sender`].
-    ///
-    /// Re-exported so apps can name it without depending on `crossbeam-channel` themselves.
-    pub use crossbeam_channel::Sender;
 }

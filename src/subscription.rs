@@ -1,6 +1,7 @@
 //! Subscription state and lifecycle management for SpacetimeDB.
 //!
 //! Manages subscription intent and active handles via Bevy systems and resources.
+use crate::channel_bridge::Sender;
 use crate::{
     channel_bridge::{channel_sender, register_channel},
     connection::StdbConnection,
@@ -9,7 +10,6 @@ use crate::{
 };
 use bevy_app::{App, Plugin, PreUpdate};
 use bevy_ecs::prelude::{DetectChanges, IntoScheduleConfigs, Res, ResMut, Resource};
-use crossbeam_channel::Sender;
 use spacetimedb_sdk::{
     __codegen::{__query_builder::Query, DbConnection, SpacetimeModule, SubscriptionBuilder},
     DbContext, Result as StdbResult, SubscriptionHandle as StdbSubscriptionHandle,
@@ -212,9 +212,9 @@ where
         let queued = self.intents.entries.iter_mut();
         for (key, entry) in queued.filter(|(_, entry)| entry.queued) {
             let applied_key = key.clone();
-            let applied_sender = self.applied_sender.clone();
+            let applied_sender = self.applied_sender.current();
             let error_key = key.clone();
-            let error_sender = self.error_sender.clone();
+            let error_sender = self.error_sender.current();
 
             let handle = conn
                 .subscription_builder()

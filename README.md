@@ -551,3 +551,82 @@ applied. Queue `disconnect()`, `clear_token()`, and `connect()` together and
 in that order. A `None` token in the connect options retains the configured
 token; `clear_token()` explicitly removes it for future attempts. Changing the
 configured token does not change the identity of an already-open connection.
+
+## Connection callback isolation
+
+Closing a socket does not retract callbacks already queued by the SDK or stop
+all work that is still finishing. For example, after logging out of account A
+and connecting as a guest, a late callback from A could refill account data that
+the game just cleared. During a server switch, an old subscription callback could
+also make the new server's subscriptions appear ready.
+
+The channel bridge associates each sender with a connection generation. When a
+`StdbCommands::disconnect()` or `StdbCommands::reconnect()` command is applied,
+it advances that generation and clears the registered Bevy message buffers.
+The bridge then discards queued or late callbacks tagged with an older generation:
+
+```text
+Account A, generation 7
+  |-- callback already forwarded into a Bevy message buffer
+  |-- callback queued in the bridge but not yet forwarded
+  `-- async work still running with a generation-7 sender
+
+Apply disconnect command -> advance to generation 8
+  |-- clear the registered Bevy message buffers
+  |-- discard generation-7 callbacks when draining the bridge
+  `-- discard late results from the old async work too
+
+Connect as guest -> register callbacks with generation-8 senders
+  `-- current callbacks pass through to Bevy message readers
+```
+
+This protects lifecycle, table, subscription, and custom-channel messages. It
+cannot undo callbacks already consumed by a system: the game still owns clearing
+its account data and deciding when the new connection is ready. The generation
+changes on the explicit commands above; a transport disconnect or an automatic
+retry alone does not advance it.
+
+The closed connection's own `on_disconnect` callback belongs to the old
+generation and is discarded too, so the command reports the close itself: one
+`StdbDisconnectedMessage` with `DisconnectIntent::Requested` is written after
+the buffers are cleared, for background- and frame-driven connections alike.
+
+### Custom callbacks must obtain a new sender
+
+`StdbChannels::sender()` now returns a generation-aware sender instead of a raw
+`crossbeam_channel::Sender`. Cloning a sender preserves its generation; it does
+not make an old sender valid for the next connection. Obtain a sender when
+starting work for the current connection, as in the reducer example above:
+
+```rust
+fn create_character(conn: Res<StdbConn>, channels: Res<StdbChannels>) {
+    // Capture the generation of the connection this request belongs to.
+    let tx = channels.sender::<CharacterCreated>();
+    let _ = conn.reducers().create_character_then("Bob".into(), move |_ctx, result| {
+        // If an explicit disconnect happened meanwhile, the bridge discards
+        // this result instead of delivering it to the new account's systems.
+        let _ = tx.send(CharacterCreated { result });
+    });
+}
+```
+
+A successful `send()` means the value was queued, not that it will be delivered;
+the generation check happens when the bridge drains the queue. Avoid keeping a
+sender across logout or server changes. Custom jobs that should survive those
+changes need a channel managed outside this connection-scoped bridge.
+
+### Capture the generation before scheduling connection work
+
+The connection builder captures callback senders before its I/O task is spawned.
+Otherwise an older task could start late and capture the new generation:
+
+```text
+Schedule connection A -> disconnect A -> schedule connection B -> A finally runs
+```
+
+A must keep its original generation even if its task starts after B was requested.
+Capturing before scheduling ensures A's lifecycle callbacks are discarded after
+the explicit disconnect. The regression test
+`reconnect_discards_buffered_and_late_callbacks_from_old_connections` exercises
+buffered messages, queued and late callbacks, cloned old senders, and delivery
+from a current sender.
