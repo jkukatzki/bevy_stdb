@@ -297,7 +297,8 @@ fn poll_pending_connection<
 
     match pending_connection {
         PendingConnection(mut task) => {
-            let Some(result) = block_on(poll_once(&mut task)) else {
+            let result = block_on(poll_once(&mut task));
+            let Some(result) = result else {
                 world.insert_resource(PendingConnection::<C>(task));
                 return;
             };

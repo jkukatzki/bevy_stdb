@@ -427,8 +427,42 @@ fn example_system(conn: Res<StdbConn>, mut subs: ResMut<StdbSubs>) {
 | --------- | ------ | --------------- | ---- |
 | 0.1 - 0.8 | 0.18   | 2.0 - 2.6       | 1.93 |
 |      0.12 | 0.19   | 2.0 - 2.6       | 1.95 |
-|      0.13 | 0.19   | 2.7+            | 1.95 |
+|      0.13 (upstream) | 0.19 | 2.7+       | 1.95 |
+|      0.13 (this fork) | 0.20 | 2.7+      | 1.95 |
 
+
+### Why this fork targets Bevy 0.20
+
+The consuming game uses Bevy 0.20, while upstream `bevy_stdb` 0.13 targets 0.19.
+The plugin must use the same Bevy version as the game: `App`, resources, messages,
+and system traits from two Bevy versions are distinct Rust types.
+
+```text
+Game's Bevy 0.20 App
+  -> install StdbPlugin built against Bevy 0.20
+  -> register resources and messages in that App's ECS World
+  -> read database events from the game's Bevy systems
+```
+
+The library's `bevy_app`, `bevy_ecs`, `bevy_tasks`, and `bevy_time` dependencies
+and the example client's `bevy` dependency move together. The library retains
+Rust 1.95 support; the example requires Rust 1.97.1 because it uses the full
+Bevy 0.20 crate.
+
+The connection-task poll also uses a separate local for its result:
+
+```rust
+let result = block_on(poll_once(&mut task));
+let Some(result) = result else {
+    world.insert_resource(PendingConnection::<C>(task));
+    return;
+};
+```
+
+This ends the temporary borrow of `task` before an unfinished task is moved back
+into the World for the next frame. Connection construction still runs on Bevy's
+I/O task pool; the version update does not introduce a separate thread or change
+the connection flow.
 
 ## Notes
 
