@@ -3,7 +3,6 @@ use bevy_ecs::{
     prelude::{Command, Commands, World},
     system::SystemParam,
 };
-use bevy_tasks::IoTaskPool;
 use spacetimedb_sdk::{
     __codegen::{DbConnection, SpacetimeModule},
     DbContext,
@@ -222,14 +221,14 @@ where
         config.clone()
     };
 
-    let task = IoTaskPool::get().spawn(async move { config.build_connection().await });
-    world.insert_resource(PendingConnection::<C>(task));
+    world.insert_resource(config.spawn());
 }
 
 fn disconnect_connection<C>(world: &mut World)
 where
     C: DbContext + Send + Sync + 'static,
 {
+    crate::channel_bridge::invalidate(world);
     if let Some(conn) = world.get_resource::<StdbConnection<C>>() {
         let _ = conn.disconnect();
     }

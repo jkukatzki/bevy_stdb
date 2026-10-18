@@ -4,6 +4,7 @@
 
 mod reconnect;
 
+use crate::channel_bridge::Sender;
 use crate::{
     alias::{ReadStdbConnectedMessage, ReadStdbDisconnectedMessage},
     channel_bridge::{channel_sender, register_channel},
@@ -13,7 +14,6 @@ use crate::{
 use bevy_app::{App, Plugin, PreUpdate};
 use bevy_ecs::prelude::{Commands, IntoScheduleConfigs, Res, Resource, World, resource_exists};
 use bevy_tasks::{IoTaskPool, Task, block_on, poll_once};
-use crossbeam_channel::Sender;
 pub(crate) use reconnect::ReconnectPlugin;
 pub use reconnect::StdbReconnectOptions;
 use spacetimedb_sdk::{
@@ -98,9 +98,9 @@ where
 {
     /// Produces a configured [`DbConnectionBuilder`] for this connection.
     fn connection_builder(&self) -> DbConnectionBuilder<M> {
-        let connected_tx = self.connected_tx.clone();
-        let disconnected_tx = self.disconnected_tx.clone();
-        let connect_error_tx = self.connect_error_tx.clone();
+        let connected_tx = self.connected_tx.current();
+        let disconnected_tx = self.disconnected_tx.current();
+        let connect_error_tx = self.connect_error_tx.current();
 
         DbConnectionBuilder::<M>::new()
             .with_database_name(self.database_name.clone())
@@ -122,14 +122,19 @@ where
             })
     }
 
-    /// Builds a SpacetimeDB connection from this config.
-    ///
-    /// The returned connection is not started automatically.
-    pub(crate) async fn build_connection(&self) -> Result<Arc<C>> {
-        #[cfg(not(feature = "browser"))]
-        return self.connection_builder().build().map(Arc::new);
-        #[cfg(feature = "browser")]
-        return self.connection_builder().build().await.map(Arc::new);
+    /// Capture callback generations before scheduling the connection on the I/O pool.
+    pub(crate) fn spawn(self) -> PendingConnection<C>
+    where
+        C: 'static,
+        M: 'static,
+    {
+        let builder = self.connection_builder();
+        PendingConnection(IoTaskPool::get().spawn(async move {
+            #[cfg(not(feature = "browser"))]
+            return builder.build().map(Arc::new);
+            #[cfg(feature = "browser")]
+            return builder.build().await.map(Arc::new);
+        }))
     }
 }
 
@@ -274,8 +279,7 @@ impl<
 
         if self.eager_connection {
             let config = app.world().resource::<StdbConnectionConfig<C, M>>().clone();
-            let task = IoTaskPool::get().spawn(async move { config.build_connection().await });
-            app.insert_resource(PendingConnection::<C>(task));
+            app.insert_resource(config.spawn());
         }
     }
 }
