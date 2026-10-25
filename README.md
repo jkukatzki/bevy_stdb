@@ -15,12 +15,15 @@ A [Bevy](https://bevy.org/) integration for [SpacetimeDB](https://spacetimedb.co
 
 `bevy_stdb` adapts SpacetimeDB's connection and callback model into Bevy-style resources, systems, plugins, and messages.
 
+[`docs/architecture.md`](docs/architecture.md) has diagrams of the pieces, the path one row
+change takes from the module to a system, and what a capability actually binds.
+
 ## Features
 
 - **Builder-style setup** via `StdbPlugin`
 - **Connection resource** access through `StdbConnection`
 - **Command interface** for sending SpacetimeDB commands through `StdbCmds`
-- **Table event bridging** through Bevy `MessageReader` aliases
+- **Table event bridging** through table readers that are views over one ordered stream per row type
 - **Callback bridging** for reducer/procedure completions through `StdbChannels` and `add_channel_message`
 - **Managed subscription intent** through `StdbSubscriptions`
 - **Optional reconnect support** through `StdbReconnectOptions`, including connections the SDK reports as cleanly closed when the server went away
@@ -171,17 +174,18 @@ fn main() {
 
 Use the `StdbPlugin` builder methods to register table bindings during app setup.
 
-Each method eagerly registers the internal Bevy message channels for the row type and stores a deferred binding that runs whenever a connection becomes active.
+Each method eagerly registers the row type's `TableChange<T>` message and stores a deferred binding that runs whenever a connection becomes active. Every capability feeds that one stream; which capabilities you bind decides which SDK callbacks run and therefore which readers you may use.
 
-The `add_*` methods are semantic convenience APIs. For capability-based registration, use `bind` or the direct `bind_insert`, `bind_delete`, `bind_update`, and `bind_insert_update` methods. Unsupported capabilities fail at compile time; duplicate bindings panic during plugin configuration with the accessor and capability in the error.
+There is one registration API, `bind`, which takes a list of `TableCapability` values, and two layers of shorthand over it. `bind_insert`, `bind_delete`, `bind_update`, and `bind_insert_update` each bind one capability. The `add_*` methods bind the list that suits a kind of table — `add_table` is `bind` with insert, delete, and update. They all land in the same place, so mix them freely. Unsupported capabilities fail at compile time, with an error that names what the table lacks (`PlayerTableAccessor does not report updated rows`). Binding is idempotent: `add_table` followed by `bind_insert` for the same accessor binds `on_insert` once.
 
 | Method | Use when |
 |---|---|
-| `add_table::<T>` | Table has a primary key — exposes insert, update, delete, and insert-or-update message readers |
-| `add_table_without_pk::<T>` | Table has no primary key — exposes insert and delete message readers |
-| `add_event_table::<T>` | Append-only log table — exposes insert message readers |
-| `add_view::<T>` | Server-computed virtual table — exposes insert and delete message readers |
+| `add_table::<T>` | Table has a primary key — exposes unified changes plus insert, update, delete, and insert-or-update readers |
+| `add_table_without_pk::<T>` | Table has no primary key — exposes unified insert/delete changes plus typed readers |
+| `add_event_table::<T>` | Append-only log table — exposes unified insert changes plus typed readers |
+| `add_view::<T>` | Server-computed virtual table — exposes unified insert/delete changes plus typed readers |
 | `bind::<T>`, `bind_*::<T>` | Explicit control — exposes specific message readers |
+| `add_*_with_ctx::<T>` | As the matching `add_*` method, with the SpacetimeDB context on every change — see [The context behind a change](#the-context-behind-a-change) |
 
 ```rust
 // Semantic convenience APIs.
@@ -195,21 +199,68 @@ The `add_*` methods are semantic convenience APIs. For capability-based registra
     TableCapability::insert(),
     TableCapability::delete(),
     TableCapability::update(),
-    TableCapability::insert_update(),
 ])
 .bind_insert::<DamageEventsTableAccessor>()
 ```
 
 ## Reading table events
 
-Depending on the table shape, systems consume database changes through MessageReader aliases:
+Depending on the table shape, systems consume database changes through these readers:
 
+- `ReadTableChangeMessage<T>` — one stream for inserts, updates, and deletes in SDK callback order
 - `ReadInsertMessage<T>`
 - `ReadDeleteMessage<T>`
 - `ReadUpdateMessage<T>`
-- `ReadInsertUpdateMessage<T>`
+- `ReadInsertUpdateMessage<T>` — inserts and updates as one stream, for mirroring a table without caring which it was
 
-These aliases are `MessageReader`s backed by internal message channels. The message types themselves are not part of the public API, so application code can observe table events without writing them directly. Values yielded by `.read()` expose the affected row data and the SpacetimeDB event that triggered the change.
+The connection and subscription readers are `MessageReader` aliases. The four table readers are views over the row type's single `TableChange<T>` stream: each filters it to the change kind it names and borrows out of it, so nothing is copied per reader and each keeps its own cursor. They have `MessageReader`'s methods, limited to their change kind: `read`, `read_with_id`, `len`, `is_empty`, and `clear`. `len` and `is_empty` scan the unread changes, where `MessageReader` counts them in constant time, and there is no `par_read`. Values yielded by `.read()` borrow the affected row data (`Inserted`, `Deleted`, `Updated`, `InsertedOrUpdated`), and the SpacetimeDB context behind the change if the row type opted in to it.
+
+Reading a stream whose callback was never bound — `ReadUpdateMessage<T>` on a table registered with `add_table_without_pk`, say — panics naming the missing callback, rather than yielding nothing forever. `ReadInsertUpdateMessage<T>` needs both inserts and updates bound, however they were bound: `bind_insert_update` is shorthand for `bind_insert` plus `bind_update`.
+
+### Unified table changes
+
+`ReadTableChangeMessage<T>` combines inserts, updates, and deletes for one row type:
+
+```rust
+use bevy_stdb::prelude::*;
+use crate::module_bindings::PlayerRow;
+
+fn on_player_change(mut changes: ReadTableChangeMessage<PlayerRow>) {
+    for change in changes.read() {
+        match change {
+            TableChange::Insert { row, .. } => { /* inserted */ }
+            TableChange::Update { old, new, .. } => { /* updated */ }
+            TableChange::Delete { row, .. } => { /* deleted */ }
+        }
+    }
+}
+```
+
+`TableChange<T>` is the one stream the SDK callbacks feed and the only place a row is stored. The readers above are views over it, each filtering to its own change kind and keeping its own cursor, so a row callback copies its row once no matter how many readers observe it. `ReadInsertUpdateMessage<T>` is one such view over `Insert` and `Update` rather than an additional `TableChange` variant.
+
+Its deterministic property is limited to preserving the order in which the SDK invokes insert, delete, and update callbacks for one row type and connection driver; it does not recover server-side mutation order within a transaction, and streams for different row types are independent.
+
+The stream is keyed by the **row type**, not the accessor. Binding both a table and a view over one row type merges their callbacks into it, and a change both of them see arrives twice with nothing to tell the two apart — subscribe to one accessor per row type when that matters.
+
+What it costs: one copy of the row per change, plus one clone of the context's event for a row type that opted in to it, no matter how many readers observe it, because the readers borrow rather than receive their own copy. The SDK callback for a given change kind runs once however many capabilities asked for it.
+
+### The context behind a change
+
+Each change can carry the SpacetimeDB context its row callback received: `ctx.event` says which
+reducer ran, with what arguments and for whom, or that the row arrived with the initial subscription
+rather than as a live change. It is off by default. The SDK invokes a row callback once per changed
+row, so carrying the context means a transaction touching 500 rows clones its event 500 times,
+reducer arguments and all. Opt in for the row types whose readers need it, with an `add_*_with_ctx`
+method or the `ctx` capability:
+
+```rust
+StdbPlugin::<DbConnection, RemoteModule>::default()
+    // ...
+    .add_table_with_ctx::<PersonTableAccessor>()
+    .bind::<DamageEventsTableAccessor>([TableCapability::insert(), TableCapability::ctx()])
+```
+
+Then read it with `ctx()`, on a `TableChange` or on what a table reader yields:
 
 ```rust
 use crate::module_bindings::Reducer;
@@ -218,9 +269,9 @@ use spacetimedb_sdk::Event;
 
 fn on_person_insert(mut messages: ReadInsertMessage<PersonRow>) {
   for msg in messages.read() {
-    match &msg.event {
+    match msg.ctx().event {
       Event::Reducer(r) => {
-        /* r.status, r.timestamp, r.reducer */ 
+        /* r.status, r.timestamp, r.reducer */
         if let Reducer::CreatePerson(p) = &r.reducer { /* ... */ }
       },
       _ => { /* ... */ }
@@ -228,6 +279,12 @@ fn on_person_insert(mut messages: ReadInsertMessage<PersonRow>) {
   }
 }
 ```
+
+`ctx()` panics for a row type that was not bound with the `ctx` capability, naming it, rather than
+reading as a change with no cause; `try_ctx()` returns an `Option` for code that handles both. The
+setting applies to the row type rather than the accessor — a table and a view over one row share
+the stream, so they share the setting — and it is order-independent: bind it before or after the
+table's other capabilities.
 
 ## Requesting a connection
 
@@ -441,6 +498,42 @@ fn example_system(conn: Res<StdbConn>, mut subs: ResMut<StdbSubs>) {
 ```
 
 
+## Performance
+
+Per change, the SDK callback copies the row once into `TableChange<T>`, and clones the context's
+event only for a row type bound with the `ctx` capability. Readers filter that one stream and borrow out of it, so
+binding more of them costs no extra copies and adds no systems to the schedule.
+
+`examples/simple/client/benches/table_streams.rs` has three groups. `frame` is what the Bevy thread
+pays: `n` changes are already in the channel when the clock starts, so an iteration is
+`app.update()` alone — the drain, then every reader. `produce` is what the SDK's thread pays per
+change downstream of the SDK, building the `TableChange` and sending it; in an app that is off the
+frame, which is why it is measured apart. `idle` is a frame with nothing to deliver, with and
+without a hundred extra channels, so the fixed cost of a registered channel is visible.
+
+For scale, on one development machine a frame delivering 10,000 changes of the example's 48-byte
+row costs about 0.29 ms, within 3% whether one reader or four consume it; producing those changes
+costs the SDK thread about 0.23 ms; and a hundred idle channels add about 2 µs to a frame.
+
+```sh
+cargo bench --manifest-path examples/simple/client/Cargo.toml --bench table_streams
+```
+
+Criterion baselines are the way to track it across a change:
+
+```sh
+# on the commit you are comparing against
+cargo bench --manifest-path examples/simple/client/Cargo.toml --bench table_streams -- --save-baseline before
+# on your change
+cargo bench --manifest-path examples/simple/client/Cargo.toml --bench table_streams -- --baseline before
+```
+
+What the bench does not cover: everything upstream of the channel send happens on the SDK's
+thread and needs a live connection, and the event clone the `ctx` capability adds happens there, so
+neither shows up here. Nor does row size: the example's row is small and flat, and a row holding
+`String`s or `Vec`s pays for its clone in `produce`. CI compiles the bench but does not time it — shared runners are too noisy
+to gate on.
+
 ## Compatibility
 
 | bevy_stdb   | bevy | spacetimedb_sdk | MSRV   |
@@ -452,6 +545,8 @@ fn example_system(conn: Res<StdbConn>, mut subs: ResMut<StdbSubs>) {
 
 
 ## Notes
+
+An `App` supports one `StdbPlugin`, and so one module: the connection messages, reconnect state, and table reader bookkeeping are not keyed by module. Talking to a second database from one app is not supported yet.
 
 This crate focuses on table-driven client workflows. Reducer and procedure access still exist through the active `StdbConnection`, but the primary Bevy-facing flow uses message readers for table events. When you need a reducer/procedure completion (or any off-schedule callback) back in the ECS, bridge it with `add_channel_message` / `StdbChannels` as shown in [Reducer and procedure callbacks](#reducer-and-procedure-callbacks).
 

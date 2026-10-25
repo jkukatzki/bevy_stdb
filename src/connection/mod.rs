@@ -5,13 +5,13 @@
 mod reconnect;
 
 use crate::{
-    alias::{ReadStdbConnectErrorMessage, ReadStdbConnectedMessage, ReadStdbDisconnectedMessage},
     channel_bridge::{channel_sender, register_channel},
     commands::StdbConnectOptions,
     message::{
         DisconnectIntent, StdbConnectErrorMessage, StdbConnectedMessage, StdbDisconnectedMessage,
         StdbDriverErrorMessage, StdbReconnectExhaustedMessage,
     },
+    reader::{ReadStdbConnectErrorMessage, ReadStdbConnectedMessage, ReadStdbDisconnectedMessage},
     set::StdbSet,
     table::bind_tables,
 };

@@ -1,18 +1,14 @@
 use crate::{
     channel_bridge::{ChannelBridgePlugin, register_channel},
     connection::{ConnectionDriver, ReconnectPlugin, StdbConnectionPlugin, StdbReconnectOptions},
-    message::RowEvent,
     set::StdbSet,
     subscription::SubscriptionsPlugin,
-    table::{TableCapability, TableRegistry},
+    table::{OnDelete, OnInsert, OnUpdate, TableCapability, TableRegistry, TableSource},
 };
 use bevy_app::{App, Plugin, PreUpdate};
 use bevy_ecs::prelude::{IntoScheduleConfigs, Message};
 use spacetimedb_sdk::{
-    __codegen::{
-        DbConnection, InModule, SpacetimeModule, SubscriptionBuilder, TableAccessor, TableLike,
-        WithDelete, WithInsert, WithUpdate,
-    },
+    __codegen::{DbConnection, SpacetimeModule, SubscriptionBuilder},
     Compression, DbContext, SubscriptionHandle,
 };
 use std::{hash::Hash, sync::Arc};
@@ -43,6 +39,12 @@ use std::{hash::Hash, sync::Arc};
 /// }
 /// ```
 ///
+/// # One plugin per app
+///
+/// An [`App`] supports a single `StdbPlugin`, and so a single module. The connection messages,
+/// the reconnect state, and the table reader bookkeeping are not keyed by module, so a second
+/// plugin would share them with the first.
+///
 /// # Panics
 ///
 /// Panics during [`Plugin::build`] if required connection settings are
@@ -59,7 +61,7 @@ pub struct StdbPlugin<
     driver: Option<ConnectionDriver<C>>,
     reconnect_options: Option<StdbReconnectOptions>,
     subscriptions_initializer: Option<fn(&mut App)>,
-    table_registry: TableRegistry<C, M>,
+    table_registry: TableRegistry<C>,
     channel_registrations: Vec<fn(&mut App)>,
 }
 
@@ -237,11 +239,17 @@ impl<C: DbConnection<Module = M> + DbContext + Send + Sync, M: SpacetimeModule<D
         self
     }
 
-    /// Registers table event capabilities for a generated table accessor.
+    /// Binds table capabilities for a generated table accessor.
     ///
-    /// Each capability constructor validates the corresponding SDK trait at
-    /// compile time. Duplicate accessor/capability pairs panic with a precise
-    /// error when this method is called.
+    /// The other table methods are shorthand for this: `bind_insert` and its siblings bind one
+    /// capability, and `add_table` and its siblings bind the capabilities that suit a kind of
+    /// table. They can be mixed freely.
+    ///
+    /// Each capability binds SDK row callbacks that send to the row type's
+    /// [`TableChange`](crate::prelude::TableChange) stream, and decides which table readers can be
+    /// used. Binding is idempotent: a callback that is already bound is not bound again. Reading a
+    /// stream whose callbacks were never bound panics, naming the missing callback. Each capability
+    /// constructor checks the matching SDK trait at compile time.
     ///
     /// # Example
     ///
@@ -250,162 +258,132 @@ impl<C: DbConnection<Module = M> + DbContext + Send + Sync, M: SpacetimeModule<D
     ///     TableCapability::insert(),
     ///     TableCapability::delete(),
     ///     TableCapability::update(),
-    ///     TableCapability::insert_update(),
     /// ])
     /// ```
-    pub fn bind<TTable>(
+    pub fn bind<TTable: TableSource<C>>(
         mut self,
-        capabilities: impl IntoIterator<Item = TableCapability<C, M, TTable>>,
-    ) -> Self
-    where
-        TTable: 'static,
-    {
+        capabilities: impl IntoIterator<Item = TableCapability<C, TTable>>,
+    ) -> Self {
         self.table_registry.bind(capabilities);
         self
     }
 
-    /// Binds insert messages for a generated table accessor.
-    pub fn bind_insert<TTable>(self) -> Self
-    where
-        TTable: TableAccessor<C::DbView> + Send + Sync + 'static,
-        TTable::Row: Send + Sync + Clone + InModule + 'static,
-        RowEvent<TTable::Row>: Send + Sync,
-        for<'db> TTable::Handle<'db>: TableLike<
-                Row = TTable::Row,
-                EventContext = <<TTable::Row as InModule>::Module as SpacetimeModule>::EventContext,
-            > + WithInsert,
-    {
-        self.bind([TableCapability::<C, M, TTable>::insert()])
+    /// Binds inserted rows of a generated table accessor, for
+    /// [`ReadInsertMessage`](crate::prelude::ReadInsertMessage).
+    pub fn bind_insert<TTable: OnInsert<C>>(self) -> Self {
+        self.bind([TableCapability::<C, TTable>::insert()])
     }
 
-    /// Binds delete messages for a generated table accessor.
-    pub fn bind_delete<TTable>(self) -> Self
-    where
-        TTable: TableAccessor<C::DbView> + Send + Sync + 'static,
-        TTable::Row: Send + Sync + Clone + InModule + 'static,
-        RowEvent<TTable::Row>: Send + Sync,
-        for<'db> TTable::Handle<'db>: TableLike<
-                Row = TTable::Row,
-                EventContext = <<TTable::Row as InModule>::Module as SpacetimeModule>::EventContext,
-            > + WithDelete,
-    {
-        self.bind([TableCapability::<C, M, TTable>::delete()])
+    /// Binds deleted rows of a generated table accessor, for
+    /// [`ReadDeleteMessage`](crate::prelude::ReadDeleteMessage).
+    pub fn bind_delete<TTable: OnDelete<C>>(self) -> Self {
+        self.bind([TableCapability::<C, TTable>::delete()])
     }
 
-    /// Binds update messages for a generated table accessor.
-    pub fn bind_update<TTable>(self) -> Self
-    where
-        TTable: TableAccessor<C::DbView> + Send + Sync + 'static,
-        TTable::Row: Send + Sync + Clone + InModule + 'static,
-        RowEvent<TTable::Row>: Send + Sync,
-        for<'db> TTable::Handle<'db>: TableLike<
-                Row = TTable::Row,
-                EventContext = <<TTable::Row as InModule>::Module as SpacetimeModule>::EventContext,
-            > + WithUpdate,
-    {
-        self.bind([TableCapability::<C, M, TTable>::update()])
+    /// Binds updated rows of a generated table accessor, for
+    /// [`ReadUpdateMessage`](crate::prelude::ReadUpdateMessage).
+    pub fn bind_update<TTable: OnUpdate<C>>(self) -> Self {
+        self.bind([TableCapability::<C, TTable>::update()])
     }
 
-    /// Binds insert-update messages for a generated table accessor.
-    pub fn bind_insert_update<TTable>(self) -> Self
-    where
-        TTable: TableAccessor<C::DbView> + Send + Sync + 'static,
-        TTable::Row: Send + Sync + Clone + InModule + 'static,
-        RowEvent<TTable::Row>: Send + Sync,
-        for<'db> TTable::Handle<'db>: TableLike<
-                Row = TTable::Row,
-                EventContext = <<TTable::Row as InModule>::Module as SpacetimeModule>::EventContext,
-            > + WithInsert
-            + WithUpdate,
-    {
-        self.bind([TableCapability::<C, M, TTable>::insert_update()])
+    /// Binds inserted and updated rows of a generated table accessor, for
+    /// [`ReadInsertUpdateMessage`](crate::prelude::ReadInsertUpdateMessage).
+    ///
+    /// Shorthand for [`Self::bind_insert`] and [`Self::bind_update`] together.
+    pub fn bind_insert_update<TTable: OnInsert<C> + OnUpdate<C>>(self) -> Self {
+        self.bind([TableCapability::<C, TTable>::insert_update()])
     }
 
-    /// Registers a table with a primary key.
+    /// Registers a table with a primary key: every change kind, and every reader.
     ///
     /// # Example
     ///
     /// ```ignore
     /// .add_table::<PlayerTableAccessor>()
     /// ```
-    pub fn add_table<TTable>(self) -> Self
-    where
-        TTable: TableAccessor<C::DbView> + Send + Sync + 'static,
-        TTable::Row: Send + Sync + Clone + InModule + 'static,
-        RowEvent<TTable::Row>: Send + Sync,
-        for<'db> TTable::Handle<'db>: TableLike<
-                Row = TTable::Row,
-                EventContext = <<TTable::Row as InModule>::Module as SpacetimeModule>::EventContext,
-            > + WithInsert
-            + WithDelete
-            + WithUpdate,
-    {
-        self.bind_insert::<TTable>()
-            .bind_delete::<TTable>()
-            .bind_update::<TTable>()
-            .bind_insert_update::<TTable>()
+    pub fn add_table<TTable: OnInsert<C> + OnDelete<C> + OnUpdate<C>>(self) -> Self {
+        self.bind::<TTable>([
+            TableCapability::insert(),
+            TableCapability::delete(),
+            TableCapability::update(),
+        ])
     }
 
-    /// Registers a table without a primary key.
+    /// Registers a table with a primary key, as [`Self::add_table`] does, with the SpacetimeDB
+    /// context on every change. See [`TableCapability::ctx`].
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// .add_table_with_ctx::<PlayerTableAccessor>()
+    /// ```
+    pub fn add_table_with_ctx<TTable: OnInsert<C> + OnDelete<C> + OnUpdate<C>>(self) -> Self {
+        self.bind::<TTable>([
+            TableCapability::insert(),
+            TableCapability::delete(),
+            TableCapability::update(),
+            TableCapability::ctx(),
+        ])
+    }
+
+    /// Registers a table without a primary key: inserts and deletes. Without a key the SDK
+    /// cannot pair an old row with a new one, so there are no updates to read.
     ///
     /// # Example
     ///
     /// ```ignore
     /// .add_table_without_pk::<NearbyMonstersTableAccessor>()
     /// ```
-    pub fn add_table_without_pk<TTable>(self) -> Self
-    where
-        TTable: TableAccessor<C::DbView> + Send + Sync + 'static,
-        TTable::Row: Send + Sync + Clone + InModule + 'static,
-        RowEvent<TTable::Row>: Send + Sync,
-        for<'db> TTable::Handle<'db>: TableLike<
-                Row = TTable::Row,
-                EventContext = <<TTable::Row as InModule>::Module as SpacetimeModule>::EventContext,
-            > + WithInsert
-            + WithDelete,
-    {
-        self.bind_insert::<TTable>().bind_delete::<TTable>()
+    pub fn add_table_without_pk<TTable: OnInsert<C> + OnDelete<C>>(self) -> Self {
+        self.bind::<TTable>([TableCapability::insert(), TableCapability::delete()])
     }
 
-    /// Registers a view.
+    /// Registers a table without a primary key, as [`Self::add_table_without_pk`] does, with the
+    /// SpacetimeDB context on every change. See [`TableCapability::ctx`].
+    pub fn add_table_without_pk_with_ctx<TTable: OnInsert<C> + OnDelete<C>>(self) -> Self {
+        self.bind::<TTable>([
+            TableCapability::insert(),
+            TableCapability::delete(),
+            TableCapability::ctx(),
+        ])
+    }
+
+    /// Registers a view: inserts and deletes.
     ///
     /// # Example
     ///
     /// ```ignore
     /// .add_view::<CharacterSelectionScreenViewTableAccessor>()
     /// ```
-    pub fn add_view<TTable>(self) -> Self
-    where
-        TTable: TableAccessor<C::DbView> + Send + Sync + 'static,
-        TTable::Row: Send + Sync + Clone + InModule + 'static,
-        RowEvent<TTable::Row>: Send + Sync,
-        for<'db> TTable::Handle<'db>: TableLike<
-                Row = TTable::Row,
-                EventContext = <<TTable::Row as InModule>::Module as SpacetimeModule>::EventContext,
-            > + WithInsert
-            + WithDelete,
-    {
-        self.bind_insert::<TTable>().bind_delete::<TTable>()
+    pub fn add_view<TTable: OnInsert<C> + OnDelete<C>>(self) -> Self {
+        self.bind::<TTable>([TableCapability::insert(), TableCapability::delete()])
     }
 
-    /// Registers an event table.
+    /// Registers a view, as [`Self::add_view`] does, with the SpacetimeDB context on every change.
+    /// See [`TableCapability::ctx`].
+    pub fn add_view_with_ctx<TTable: OnInsert<C> + OnDelete<C>>(self) -> Self {
+        self.bind::<TTable>([
+            TableCapability::insert(),
+            TableCapability::delete(),
+            TableCapability::ctx(),
+        ])
+    }
+
+    /// Registers an event table: inserts only.
     ///
     /// # Example
     ///
     /// ```ignore
     /// .add_event_table::<LogEventsTableAccessor>()
     /// ```
-    pub fn add_event_table<TTable>(self) -> Self
-    where
-        TTable: TableAccessor<C::DbView> + Send + Sync + 'static,
-        TTable::Row: Send + Sync + Clone + InModule + 'static,
-        RowEvent<TTable::Row>: Send + Sync,
-        for<'db> TTable::Handle<'db>: TableLike<
-                Row = TTable::Row,
-                EventContext = <<TTable::Row as InModule>::Module as SpacetimeModule>::EventContext,
-            > + WithInsert,
-    {
-        self.bind_insert::<TTable>()
+    pub fn add_event_table<TTable: OnInsert<C>>(self) -> Self {
+        self.bind::<TTable>([TableCapability::insert()])
+    }
+
+    /// Registers an event table, as [`Self::add_event_table`] does, with the SpacetimeDB context on
+    /// every inserted row. See [`TableCapability::ctx`].
+    pub fn add_event_table_with_ctx<TTable: OnInsert<C>>(self) -> Self {
+        self.bind::<TTable>([TableCapability::insert(), TableCapability::ctx()])
     }
 
     /// Registers a bridged message channel for `T`.
