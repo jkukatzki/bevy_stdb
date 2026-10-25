@@ -1,23 +1,28 @@
-use crate::connection::{PendingConnection, StdbConnection, StdbConnectionConfig};
+use crate::connection::{
+    PendingConnection, StdbConnection, StdbConnectionConfig, cancel_retry, close_connection,
+    end_reconnect_cycle, start_attempt,
+};
 use bevy_ecs::{
     prelude::{Command, Commands, World},
     system::SystemParam,
 };
-use bevy_tasks::IoTaskPool;
 use spacetimedb_sdk::{
     __codegen::{DbConnection, SpacetimeModule},
     DbContext,
 };
 use std::marker::PhantomData;
 
-/// Options for starting a SpacetimeDB connection attempt.
+/// Connection settings to override when a connection attempt starts.
+///
+/// Each field that is `Some` replaces the stored setting for this attempt and every later one,
+/// including automatic reconnects. Fields left `None` keep the current setting.
 #[derive(Clone, Debug, Default)]
 pub struct StdbConnectOptions {
-    /// Optional access token for this connection attempt.
+    /// The access token to connect with.
     pub token: Option<String>,
-    /// Optional URI for this connection attempt.
+    /// The URI to connect to.
     pub uri: Option<String>,
-    /// Optional database name for this connection attempt.
+    /// The database name to connect to.
     pub database_name: Option<String>,
 }
 
@@ -77,20 +82,32 @@ where
 {
     /// Requests a SpacetimeDB connection attempt using [`StdbConnectOptions`].
     ///
-    /// No-op if a [`StdbConnection`] exists or a connection attempt is already in flight.
+    /// This ends any reconnect cycle in progress, including a retry attempt in flight, so the new
+    /// attempt uses `options` and a failure is retried with the full
+    /// [`StdbReconnectOptions`](crate::prelude::StdbReconnectOptions) budget. Does nothing more if
+    /// a [`StdbConnection`] exists or another attempt is already in flight.
     pub fn connect(&mut self, options: StdbConnectOptions) {
-        self.commands
-            .queue(StartConnectCommand::<C, M>::new(options));
+        self.commands.queue(move |world: &mut World| {
+            end_reconnect_cycle(world);
+            cancel_retry::<C>(world);
+            StartConnectCommand::<C, M>::new(options).apply(world);
+        });
     }
 
     /// Requests a new connection after closing the active or pending connection.
+    ///
+    /// The close is reported as [`DisconnectIntent::Requested`](crate::prelude::DisconnectIntent),
+    /// and stored subscriptions are applied to the new connection.
     pub fn reconnect(&mut self, options: StdbConnectOptions) {
         self.commands.queue(ReconnectCommand::<C, M>::new(options));
     }
 
     /// Requests disconnection from the active SpacetimeDB connection.
+    ///
+    /// The close is reported as [`DisconnectIntent::Requested`](crate::prelude::DisconnectIntent)
+    /// and is not retried. This also cancels any pending reconnect attempt.
     pub fn disconnect(&mut self) {
-        self.commands.queue(DisconnectCommand::<C>::new());
+        self.commands.queue(DisconnectCommand::<C, M>::new());
     }
 
     /// Sets the authentication token in the SpacetimeDB connection config.
@@ -110,6 +127,8 @@ where
 /// A command that starts a SpacetimeDB connection attempt.
 pub(crate) struct StartConnectCommand<C, M> {
     options: StdbConnectOptions,
+    /// Whether the reconnect timer asked for this attempt.
+    retry: bool,
     _marker: PhantomData<fn() -> (C, M)>,
 }
 
@@ -118,6 +137,16 @@ impl<C, M> StartConnectCommand<C, M> {
     pub(crate) fn new(options: StdbConnectOptions) -> Self {
         Self {
             options,
+            retry: false,
+            _marker: PhantomData,
+        }
+    }
+
+    /// Creates [`StartConnectCommand`] for an attempt the reconnect timer asked for.
+    pub(crate) fn retry() -> Self {
+        Self {
+            options: StdbConnectOptions::default(),
+            retry: true,
             _marker: PhantomData,
         }
     }
@@ -136,7 +165,7 @@ where
             return;
         }
 
-        spawn_connection_task::<C, M>(world, self.options);
+        start_attempt::<C, M>(world, self.options, self.retry);
     }
 }
 
@@ -161,16 +190,16 @@ where
 {
     type Out = ();
     fn apply(self, world: &mut World) {
-        disconnect_connection::<C>(world);
-        spawn_connection_task::<C, M>(world, self.options);
+        close_connection::<C, M>(world);
+        start_attempt::<C, M>(world, self.options, false);
     }
 }
 
-struct DisconnectCommand<C> {
-    _marker: PhantomData<fn() -> C>,
+struct DisconnectCommand<C, M> {
+    _marker: PhantomData<fn() -> (C, M)>,
 }
 
-impl<C> DisconnectCommand<C> {
+impl<C, M> DisconnectCommand<C, M> {
     fn new() -> Self {
         Self {
             _marker: PhantomData,
@@ -178,49 +207,13 @@ impl<C> DisconnectCommand<C> {
     }
 }
 
-impl<C> Command for DisconnectCommand<C>
-where
-    C: DbContext + Send + Sync + 'static,
-{
-    type Out = ();
-    fn apply(self, world: &mut World) {
-        disconnect_connection::<C>(world);
-    }
-}
-
-fn spawn_connection_task<C, M>(world: &mut World, options: StdbConnectOptions)
+impl<C, M> Command for DisconnectCommand<C, M>
 where
     C: DbConnection<Module = M> + DbContext + Send + Sync + 'static,
     M: SpacetimeModule<DbConnection = C> + 'static,
 {
-    let config = {
-        let mut config = world.resource_mut::<StdbConnectionConfig<C, M>>();
-
-        if let Some(uri) = options.uri {
-            config.uri = uri;
-        }
-        if let Some(database_name) = options.database_name {
-            config.database_name = database_name;
-        }
-        if let Some(token) = options.token {
-            config.token = Some(token);
-        }
-
-        config.clone()
-    };
-
-    let task = IoTaskPool::get().spawn(async move { config.build_connection().await });
-    world.insert_resource(PendingConnection::<C>(task));
-}
-
-fn disconnect_connection<C>(world: &mut World)
-where
-    C: DbContext + Send + Sync + 'static,
-{
-    if let Some(conn) = world.get_resource::<StdbConnection<C>>() {
-        let _ = conn.disconnect();
+    type Out = ();
+    fn apply(self, world: &mut World) {
+        close_connection::<C, M>(world);
     }
-
-    world.remove_resource::<StdbConnection<C>>();
-    world.remove_resource::<PendingConnection<C>>();
 }

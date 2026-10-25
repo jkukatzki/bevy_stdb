@@ -19,17 +19,66 @@ pub struct StdbConnectedMessage {
     pub access_token: String,
 }
 
+/// Why a SpacetimeDB connection closed without an SDK error.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DisconnectIntent {
+    /// This client closed the connection, through
+    /// [`StdbConnection::disconnect`](crate::prelude::StdbConnection::disconnect) or
+    /// [`StdbCommands`](crate::prelude::StdbCommands).
+    Requested,
+    /// The connection closed without being requested, as it does when the server goes away.
+    ///
+    /// Reconnect retries a lost connection the same way it retries an error. A close made through
+    /// an SDK context, such as `ctx.disconnect()` in a reducer callback, is also reported as lost;
+    /// disconnect through [`StdbConnection::disconnect`](crate::prelude::StdbConnection::disconnect)
+    /// or [`StdbCommands::disconnect`](crate::prelude::StdbCommands::disconnect) instead.
+    Lost,
+}
+
 /// A [`Message`] sent when a SpacetimeDB connection is closed or lost.
 #[derive(Message, Debug)]
 pub struct StdbDisconnectedMessage {
-    /// The error that caused the disconnect, if any.
-    pub err: Option<Error>,
+    /// Why the connection closed, or the error the SDK reported for it.
+    pub result: Result<DisconnectIntent, Error>,
+}
+
+impl StdbDisconnectedMessage {
+    /// Returns `true` if this client requested the disconnect.
+    pub fn was_requested(&self) -> bool {
+        matches!(self.result, Ok(DisconnectIntent::Requested))
+    }
 }
 
 /// A [`Message`] sent when a SpacetimeDB connection fails to connect.
 #[derive(Message, Debug)]
 pub struct StdbConnectErrorMessage {
     /// The error that caused the connection attempt to fail.
+    pub err: Error,
+}
+
+/// A [`Message`] sent when reconnecting gives up.
+///
+/// Sent once [`StdbReconnectOptions::max_attempts`](crate::prelude::StdbReconnectOptions::max_attempts)
+/// attempts have failed. No further attempt is made until one is requested with
+/// [`StdbCommands::connect`](crate::prelude::StdbCommands::connect) or
+/// [`StdbCommands::reconnect`](crate::prelude::StdbCommands::reconnect).
+#[derive(Message, Clone, Debug)]
+pub struct StdbReconnectExhaustedMessage {
+    /// The number of attempts made.
+    pub attempts: u32,
+}
+
+/// A [`Message`] sent when a frame-driven connection fails to advance.
+///
+/// Only a connection configured with
+/// [`StdbPlugin::with_frame_driver`](crate::prelude::StdbPlugin::with_frame_driver) sends this.
+/// Errors that end the connection are reported through
+/// [`ReadStdbDisconnectedMessage`](crate::prelude::ReadStdbDisconnectedMessage), or through
+/// [`ReadStdbConnectErrorMessage`](crate::prelude::ReadStdbConnectErrorMessage) if the connection
+/// never finished connecting.
+#[derive(Message, Debug)]
+pub struct StdbDriverErrorMessage {
+    /// The error the driver returned.
     pub err: Error,
 }
 

@@ -5,28 +5,40 @@
 mod reconnect;
 
 use crate::{
-    alias::{ReadStdbConnectedMessage, ReadStdbDisconnectedMessage},
+    alias::{ReadStdbConnectErrorMessage, ReadStdbConnectedMessage, ReadStdbDisconnectedMessage},
     channel_bridge::{channel_sender, register_channel},
-    message::{StdbConnectErrorMessage, StdbConnectedMessage, StdbDisconnectedMessage},
+    commands::StdbConnectOptions,
+    message::{
+        DisconnectIntent, StdbConnectErrorMessage, StdbConnectedMessage, StdbDisconnectedMessage,
+        StdbDriverErrorMessage, StdbReconnectExhaustedMessage,
+    },
     set::StdbSet,
+    table::bind_tables,
 };
 use bevy_app::{App, Plugin, PreUpdate};
-use bevy_ecs::prelude::{Commands, IntoScheduleConfigs, Res, Resource, World, resource_exists};
+use bevy_ecs::prelude::{
+    Commands, IntoScheduleConfigs, MessageWriter, Res, Resource, World, resource_exists,
+};
 use bevy_tasks::{IoTaskPool, Task, block_on, poll_once};
 use crossbeam_channel::Sender;
-pub(crate) use reconnect::ReconnectPlugin;
 pub use reconnect::StdbReconnectOptions;
+pub(crate) use reconnect::{ReconnectPlugin, end_reconnect_cycle};
 use spacetimedb_sdk::{
     __codegen::{DbConnection, SpacetimeModule},
     Compression, ConnectionId, DbConnectionBuilder, DbContext, Identity, Result,
 };
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 /// Stores the in-flight task for a pending connection attempt.
 #[derive(Resource)]
-pub(crate) struct PendingConnection<C: DbContext + Send + Sync + 'static>(
-    pub(crate) Task<Result<Arc<C>>>,
-);
+pub(crate) struct PendingConnection<C: DbContext + Send + Sync + 'static> {
+    task: Task<Result<StdbConnection<C>>>,
+    /// Whether the reconnect timer started this attempt.
+    retry: bool,
+}
 
 /// Internal connection driver configuration.
 pub(crate) enum ConnectionDriver<C: DbContext + Send + Sync + 'static> {
@@ -61,7 +73,7 @@ pub(crate) struct StdbConnectionConfig<
     /// Optional authentication token.
     pub(crate) token: Option<String>,
     /// The configured connection driver.
-    driver: Option<ConnectionDriver<C>>,
+    driver: ConnectionDriver<C>,
     /// Compression configuration for the connection.
     compression: Compression,
     /// Sender used by the SpacetimeDB on-connect callback.
@@ -97,7 +109,11 @@ where
     M: SpacetimeModule<DbConnection = C>,
 {
     /// Produces a configured [`DbConnectionBuilder`] for this connection.
-    fn connection_builder(&self) -> DbConnectionBuilder<M> {
+    ///
+    /// [`StdbConnection::disconnect`] sets `disconnect_requested`, and the `on_disconnect`
+    /// callback reads it to report the close as [`DisconnectIntent::Requested`] or
+    /// [`DisconnectIntent::Lost`]. The SDK reports both kinds of close without an error.
+    fn connection_builder(&self, disconnect_requested: Arc<AtomicBool>) -> DbConnectionBuilder<M> {
         let connected_tx = self.connected_tx.clone();
         let disconnected_tx = self.disconnected_tx.clone();
         let connect_error_tx = self.connect_error_tx.clone();
@@ -114,10 +130,14 @@ where
                 });
             })
             .on_disconnect(move |_ctx, err| {
-                let _ = disconnected_tx.send(StdbDisconnectedMessage { err });
+                let result = if disconnect_requested.swap(false, Ordering::AcqRel) {
+                    Ok(DisconnectIntent::Requested)
+                } else {
+                    err.map_or(Ok(DisconnectIntent::Lost), Err)
+                };
+                let _ = disconnected_tx.send(StdbDisconnectedMessage { result });
             })
             .on_connect_error(move |_ctx, err| {
-                // TODO: waiting for STDB release with fix for this to function properly.
                 let _ = connect_error_tx.send(StdbConnectErrorMessage { err });
             })
     }
@@ -125,11 +145,19 @@ where
     /// Builds a SpacetimeDB connection from this config.
     ///
     /// The returned connection is not started automatically.
-    pub(crate) async fn build_connection(&self) -> Result<Arc<C>> {
+    pub(crate) async fn build_connection(&self) -> Result<StdbConnection<C>> {
+        let disconnect_requested = Arc::new(AtomicBool::new(false));
+        let builder = self.connection_builder(Arc::clone(&disconnect_requested));
+
         #[cfg(not(feature = "browser"))]
-        return self.connection_builder().build().map(Arc::new);
+        let conn = builder.build()?;
         #[cfg(feature = "browser")]
-        return self.connection_builder().build().await.map(Arc::new);
+        let conn = builder.build().await?;
+
+        Ok(StdbConnection {
+            conn: Arc::new(conn),
+            disconnect_requested,
+        })
     }
 }
 
@@ -141,13 +169,8 @@ where
 pub struct StdbConnection<T: DbContext + 'static> {
     /// The underlying connection context.
     conn: Arc<T>,
-}
-
-impl<T: DbContext> StdbConnection<T> {
-    /// Wraps an existing shared connection.
-    fn new(conn: Arc<T>) -> Self {
-        Self { conn }
-    }
+    /// Set by [`Self::disconnect`], and read by this connection's `on_disconnect` callback.
+    disconnect_requested: Arc<AtomicBool>,
 }
 
 impl<T: DbContext> StdbConnection<T> {
@@ -172,7 +195,15 @@ impl<T: DbContext> StdbConnection<T> {
     }
 
     /// Closes the connection to the SpacetimeDB server.
+    ///
+    /// The resulting [`StdbDisconnectedMessage`](crate::prelude::StdbDisconnectedMessage) reports
+    /// [`DisconnectIntent::Requested`], so reconnect does not retry it. Only this method and
+    /// [`StdbCommands::disconnect`](crate::prelude::StdbCommands::disconnect) mark a close as
+    /// requested; a close made through an SDK context is reported as lost.
     pub fn disconnect(&self) -> Result<()> {
+        // Set even if the SDK refuses: it only refuses a connection that is already closing,
+        // and that close still counts as requested.
+        self.disconnect_requested.store(true, Ordering::Release);
         self.conn.disconnect()
     }
 
@@ -219,7 +250,7 @@ pub(crate) struct StdbConnectionPlugin<
     /// Starts the initial connection when the plugin is built.
     pub eager_connection: bool,
     /// The configured connection driver.
-    pub driver: Option<ConnectionDriver<C>>,
+    pub driver: ConnectionDriver<C>,
     /// Compression configuration for the connection.
     pub compression: Compression,
 }
@@ -259,82 +290,153 @@ impl<
                 .in_set(StdbSet::Connection),
         );
 
-        if matches!(self.driver, Some(ConnectionDriver::FrameTick(_))) {
+        app.add_message::<StdbDriverErrorMessage>();
+        app.add_message::<StdbReconnectExhaustedMessage>();
+        if let ConnectionDriver::FrameTick(frame_tick) = self.driver {
             app.add_systems(
                 PreUpdate,
-                (|conn: Res<StdbConnection<C>>, config: Res<StdbConnectionConfig<C, M>>| {
-                    if let Some(ConnectionDriver::FrameTick(frame_tick)) = config.driver {
-                        let _ = frame_tick(conn.conn.as_ref());
+                (move |conn: Res<StdbConnection<C>>,
+                       mut errors: MessageWriter<StdbDriverErrorMessage>| {
+                    match frame_tick(conn.conn.as_ref()) {
+                        Ok(()) => {}
+                        // An error that ends the connection is reported by the SDK's
+                        // `on_disconnect` or `on_connect_error` callback instead.
+                        Err(_) if !conn.is_active() => {}
+                        Err(err) => {
+                            errors.write(StdbDriverErrorMessage { err });
+                        }
                     }
                 })
-                .in_set(StdbSet::Connection)
+                .in_set(StdbSet::Drive)
                 .run_if(resource_exists::<StdbConnection<C>>),
             );
         }
 
         if self.eager_connection {
-            let config = app.world().resource::<StdbConnectionConfig<C, M>>().clone();
-            let task = IoTaskPool::get().spawn(async move { config.build_connection().await });
-            app.insert_resource(PendingConnection::<C>(task));
+            start_attempt::<C, M>(app.world_mut(), StdbConnectOptions::default(), false);
         }
     }
 }
 
-/// Polls a pending connection resource per tick, advancing the connection phase when needed.
+/// Starts a connection attempt, first applying the `Some` fields of `options` to the stored
+/// settings.
+///
+/// `retry` marks an attempt the reconnect timer started, which an explicit connect replaces.
+pub(crate) fn start_attempt<C, M>(world: &mut World, options: StdbConnectOptions, retry: bool)
+where
+    C: DbConnection<Module = M> + DbContext + Send + Sync + 'static,
+    M: SpacetimeModule<DbConnection = C> + 'static,
+{
+    let config = {
+        let mut config = world.resource_mut::<StdbConnectionConfig<C, M>>();
+        if let Some(uri) = options.uri {
+            config.uri = uri;
+        }
+        if let Some(database_name) = options.database_name {
+            config.database_name = database_name;
+        }
+        if let Some(token) = options.token {
+            config.token = Some(token);
+        }
+        config.clone()
+    };
+
+    let task = IoTaskPool::get().spawn(async move { config.build_connection().await });
+    world.insert_resource(PendingConnection::<C> { task, retry });
+}
+
+/// Drops the connection attempt in flight if the reconnect timer started it.
+pub(crate) fn cancel_retry<C: DbContext + Send + Sync + 'static>(world: &mut World) {
+    if world
+        .get_resource::<PendingConnection<C>>()
+        .is_some_and(|pending| pending.retry)
+    {
+        world.remove_resource::<PendingConnection<C>>();
+    }
+}
+
+/// Closes the active connection and drops any attempt in flight, ending the reconnect cycle.
+///
+/// A frame-driven connection is never advanced once it is removed, so its `on_disconnect` callback
+/// never runs, and the close is reported here instead.
+pub(crate) fn close_connection<C, M>(world: &mut World)
+where
+    C: DbConnection<Module = M> + DbContext + Send + Sync + 'static,
+    M: SpacetimeModule<DbConnection = C> + 'static,
+{
+    end_reconnect_cycle(world);
+    world.remove_resource::<PendingConnection<C>>();
+    let Some(conn) = world.remove_resource::<StdbConnection<C>>() else {
+        return;
+    };
+
+    // A requested close the callback has not reported yet: either this one, or an earlier one
+    // still waiting for the server.
+    let unreported = conn.is_active() || conn.disconnect_requested.load(Ordering::Acquire);
+    let _ = conn.disconnect();
+    let frame_driven = matches!(
+        world.resource::<StdbConnectionConfig<C, M>>().driver,
+        ConnectionDriver::FrameTick(_)
+    );
+    if unreported && frame_driven {
+        world.write_message(StdbDisconnectedMessage {
+            result: Ok(DisconnectIntent::Requested),
+        });
+    }
+}
+
+/// Polls the pending connection attempt, activating the connection once it resolves.
 fn poll_pending_connection<
     C: DbConnection<Module = M> + DbContext + Send + Sync + 'static,
     M: SpacetimeModule<DbConnection = C> + 'static,
 >(
     world: &mut World,
 ) {
-    let Some(pending_connection) = world.remove_resource::<PendingConnection<C>>() else {
+    let Some(mut pending) = world.get_resource_mut::<PendingConnection<C>>() else {
         return;
     };
+    let Some(result) = block_on(poll_once(&mut pending.task)) else {
+        return;
+    };
+    world.remove_resource::<PendingConnection<C>>();
 
-    match pending_connection {
-        PendingConnection(mut task) => {
-            let Some(result) = block_on(poll_once(&mut task)) else {
-                world.insert_resource(PendingConnection::<C>(task));
-                return;
-            };
+    match result {
+        Ok(conn) => {
+            // Bind the table callbacks before the driver starts or any subscription is applied,
+            // so no row arrives before its callback exists.
+            bind_tables::<C, M>(world, conn.db());
 
-            match result {
-                Ok(conn) => {
-                    let driver = world
-                        .get_resource::<StdbConnectionConfig<C, M>>()
-                        .expect("StdbConnectionConfig should exist when activating a connection")
-                        .driver
-                        .clone();
-
-                    if let Some(ConnectionDriver::Background(background_driver)) = driver {
-                        background_driver(conn.as_ref());
-                    }
-
-                    if let Some(prev_conn) = world.get_resource::<StdbConnection<C>>() {
-                        let _ = prev_conn.disconnect();
-                    }
-                    world.insert_resource(StdbConnection::new(conn));
-                }
-                Err(err) => {
-                    world.write_message(StdbConnectErrorMessage { err });
-                    // TODO log or send message for the error
-                    // error!("failed to build SpacetimeDB connection: {err}");
-                }
+            let config = world.resource::<StdbConnectionConfig<C, M>>();
+            if let ConnectionDriver::Background(background_driver) = &config.driver {
+                background_driver(conn.conn.as_ref());
             }
+
+            // Remove the old connection first, so the new one is always seen as added.
+            if let Some(prev_conn) = world.remove_resource::<StdbConnection<C>>() {
+                let _ = prev_conn.disconnect();
+            }
+            world.insert_resource(conn);
+        }
+        Err(err) => {
+            world.write_message(StdbConnectErrorMessage { err });
         }
     }
 }
 
-// Ensures the StdbConnection resource is valid when it exists, otherwise it should be removed
+/// Removes the [`StdbConnection`] once the SDK reports it closed.
+///
+/// A connection that closes before its handshake completes is reported as a connect error, so
+/// connect errors are checked as well as disconnects.
 fn sync_connection_resource<C: DbContext + Send + Sync + 'static>(
-    mut connected_msgs: ReadStdbConnectedMessage,
-    mut disconnected_msgs: ReadStdbDisconnectedMessage,
+    mut connected: ReadStdbConnectedMessage,
+    mut disconnected: ReadStdbDisconnectedMessage,
+    mut connect_errors: ReadStdbConnectErrorMessage,
     conn: Option<Res<StdbConnection<C>>>,
     mut commands: Commands,
 ) {
-    if (connected_msgs.read().next().is_some() || disconnected_msgs.read().next().is_some())
-        && conn.as_ref().is_some_and(|conn| !conn.is_active())
-    {
+    let reported =
+        connected.read().count() + disconnected.read().count() + connect_errors.read().count();
+    if reported > 0 && conn.is_some_and(|conn| !conn.is_active()) {
         commands.remove_resource::<StdbConnection<C>>();
     }
 }
